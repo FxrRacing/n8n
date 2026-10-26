@@ -1,0 +1,122 @@
+# FXR: build our n8n fork and deploy it to Azure Container Apps.
+# Upstream n8n workflows in this folder are disabled in the repo settings.
+name: 'FXR: Build & Deploy'
+
+on:
+  push:
+    branches: [fxr]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        type: choice
+        default: production
+        options: [production, staging]
+
+concurrency:
+  group: fxr-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: fxrn8nacr.azurecr.io
+  IMAGE: fxrn8nacr.azurecr.io/n8n
+  NODE_VERSION: '24.15.0'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short=12 HEAD)
+          echo "tag=fxr-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "N8N_VERSION=$(node -p "require('./packages/cli/package.json').version")-fxr.${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      - name: Install and build n8n
+        uses: ./.github/actions/setup-nodejs
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          build-command: 'pnpm build:n8n'
+        env:
+          CI: 'true'
+          NODE_OPTIONS: '--max-old-space-size=6144'
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name fxrn8nacr
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/images/n8n/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            N8N_VERSION=${{ env.N8N_VERSION }}
+            N8N_RELEASE_TYPE=stable
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:fxr-latest
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+  deploy:
+    name: Deploy ${{ inputs.environment || 'production' }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'production' }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update container app
+        env:
+          APP: ${{ vars.CONTAINERAPP_NAME || 'n8n-app' }}
+          RG: ${{ vars.CONTAINERAPP_RG || 'n8n-rg' }}
+        run: |
+          az containerapp update -g "$RG" -n "$APP" \
+            --image "${IMAGE}:${{ needs.build.outputs.tag }}" \
+            --revision-suffix "$(echo '${{ needs.build.outputs.tag }}' | tr -c 'a-z0-9\n' '-')" \
+            --query "properties.latestRevisionName" -o tsv
+
+      - name: Wait for healthy revision
+        env:
+          APP: ${{ vars.CONTAINERAPP_NAME || 'n8n-app' }}
+          RG: ${{ vars.CONTAINERAPP_RG || 'n8n-rg' }}
+        run: |
+          for i in $(seq 1 30); do
+            STATE=$(az containerapp revision list -g "$RG" -n "$APP" --query "[?properties.active].properties.healthState | [0]" -o tsv)
+            echo "health: $STATE"
+            [ "$STATE" = "Healthy" ] && exit 0
+            sleep 10
+          done
+          echo "revision did not become healthy"; exit 1

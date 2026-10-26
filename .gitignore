@@ -76,3 +76,6 @@ packages/cli/src/commands/export/outputs
 lefthook-local.yml
 .playwright-mcp
 stryker.log
+
+# local pnpm store (stray, never commit)
+.pnpm-store/
