@@ -14,3 +14,10 @@
 
 Upstream n8n's own GitHub workflows are disabled in the repo's Actions settings; leave them
 disabled after each sync (new upstream workflow files need disabling once).
+
+## Queue mode
+
+Production runs in queue mode: `n8n-app` serves the editor and webhooks, `n8n-worker`
+runs executions, Azure Managed Redis (`fxr-n8n-redis`) is the queue. Both apps must run the
+same image and share the `n8n-encryption-key` secret. The pipeline deploys both when the
+`CONTAINERAPP_WORKER_NAME` repo variable is set. Worker replicas scale 1 to 3 on queue depth.
