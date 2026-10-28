@@ -1,0 +1,3 @@
+allowBuilds:
+  # Transitive dep of n8n-workflow; native build not needed for type-checking
+  isolated-vm: false

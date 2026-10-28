@@ -55,6 +55,19 @@ jobs:
           CI: 'true'
           NODE_OPTIONS: '--max-old-space-size=6144'
 
+      # FXR custom nodes: built here and placed inside the compiled n8n tree, which the
+      # upstream Dockerfile copies to /usr/local/lib/node_modules/n8n. n8n loads them via
+      # N8N_CUSTOM_EXTENSIONS (set in the deploy job). No Dockerfile changes needed.
+      - name: Build FXR custom nodes
+        working-directory: fxr/nodes/netsuite
+        run: |
+          pnpm install --ignore-workspace --frozen-lockfile
+          pnpm build
+          mkdir -p ../../../compiled/fxr-nodes/netsuite
+          cp -R dist/. ../../../compiled/fxr-nodes/netsuite/
+          cp package.json ../../../compiled/fxr-nodes/netsuite/
+          find ../../../compiled/fxr-nodes -type f | head -20
+
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
@@ -106,13 +119,15 @@ jobs:
           # FXR-authored backend modules to enable (comma separated). Set with the image so
           # an env change never lands on an image that lacks the module.
           ENABLED_MODULES: ${{ vars.N8N_ENABLED_MODULES || 'fxr-sharing,fxr-projects' }}
+          # Directory inside the image holding FXR custom node packages (see build job).
+          CUSTOM_EXTENSIONS: /usr/local/lib/node_modules/n8n/fxr-nodes
         run: |
           SUFFIX="$(echo '${{ needs.build.outputs.tag }}' | tr -c 'a-z0-9\n' '-')"
           for A in "$APP" $WORKER; do
             echo "deploying $A"
             az containerapp update -g "$RG" -n "$A" \
               --image "${IMAGE}:${{ needs.build.outputs.tag }}" \
-              --set-env-vars "N8N_ENABLED_MODULES=${ENABLED_MODULES}" \
+              --set-env-vars "N8N_ENABLED_MODULES=${ENABLED_MODULES}" "N8N_CUSTOM_EXTENSIONS=${CUSTOM_EXTENSIONS}" \
               --revision-suffix "$SUFFIX" \
               --query "properties.latestRevisionName" -o tsv
           done

@@ -26,3 +26,8 @@ same image and share the `n8n-encryption-key` secret. The pipeline deploys both 
 - FXR backend modules live in `packages/cli/src/modules/fxr-*/` and are enabled per environment via
   `N8N_ENABLED_MODULES` (set by the deploy workflow). First one: `fxr-sharing`.
 - fxr-projects spec: see SPEC-fxr-projects.md
+- FXR custom nodes live in `fxr/nodes/<name>/` as standalone n8n community-node packages
+  (own `package.json`, built with `tsc`). CI builds them into `compiled/fxr-nodes/` so they ship in
+  the image; n8n loads them via `N8N_CUSTOM_EXTENSIONS`. First one: `netsuite` (SuiteTalk REST,
+  SuiteQL, raw requests, Token-Based Auth). Local dev: `cd fxr/nodes/netsuite && pnpm install
+  --ignore-workspace && pnpm build`, then symlink `dist` into `~/.n8n/custom`.
