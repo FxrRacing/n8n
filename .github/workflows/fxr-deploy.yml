@@ -58,15 +58,16 @@ jobs:
       # FXR custom nodes: built here and placed inside the compiled n8n tree, which the
       # upstream Dockerfile copies to /usr/local/lib/node_modules/n8n. n8n loads them via
       # N8N_CUSTOM_EXTENSIONS (set in the deploy job). No Dockerfile changes needed.
+      # Compiled with the monorepo's own TypeScript and n8n-workflow build (tsconfig.ci.json maps
+      # the import), so no package install is needed and nothing new goes through the registry.
       - name: Build FXR custom nodes
-        working-directory: fxr/nodes/netsuite
         run: |
-          pnpm install --ignore-workspace --frozen-lockfile
-          pnpm build
-          mkdir -p ../../../compiled/fxr-nodes/netsuite
-          cp -R dist/. ../../../compiled/fxr-nodes/netsuite/
-          cp package.json ../../../compiled/fxr-nodes/netsuite/
-          find ../../../compiled/fxr-nodes -type f | head -20
+          pnpm exec tsc -p fxr/nodes/netsuite/tsconfig.ci.json
+          (cd fxr/nodes/netsuite && node scripts/copy-assets.mjs)
+          mkdir -p compiled/fxr-nodes/netsuite
+          cp -R fxr/nodes/netsuite/dist/. compiled/fxr-nodes/netsuite/
+          cp fxr/nodes/netsuite/package.json compiled/fxr-nodes/netsuite/
+          find compiled/fxr-nodes -type f | head -20
 
       - name: Azure login (OIDC)
         uses: azure/login@v2

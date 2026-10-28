@@ -81,4 +81,6 @@ pnpm typecheck
 ```
 
 Local n8n: symlink `dist` into `~/.n8n/custom` or set `N8N_CUSTOM_EXTENSIONS` to the parent of
-`dist`. In the FXR image the pipeline copies `dist` to `/usr/local/lib/node_modules/n8n/fxr-nodes/netsuite`.
+`dist`. In CI the package is compiled from the repo root with `tsc -p tsconfig.ci.json`, which uses
+the monorepo's TypeScript and `n8n-workflow` build (no package install), and `dist` is copied to
+`/usr/local/lib/node_modules/n8n/fxr-nodes/netsuite` inside the image.

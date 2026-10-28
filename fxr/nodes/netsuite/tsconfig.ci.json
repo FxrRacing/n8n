@@ -1,0 +1,11 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"incremental": false,
+		"paths": {
+			"n8n-workflow": [
+				"../../../packages/workflow/dist/esm/index.d.ts"
+			]
+		}
+	}
+}
