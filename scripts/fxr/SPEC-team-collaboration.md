@@ -5,12 +5,38 @@ Status: draft for review. Owner: Derek. Target: production n8n on Azure (`n8n-ap
 ## Problem
 
 n8n Community gives every user a personal space and no way to share workflows or credentials with
-other users. Team projects, sharing and ownership transfer are Enterprise features (see
+other users. n8n's own sharing UI and team projects are Enterprise features (see
 `LICENSED-FEATURES.md`). We have several people who need to build, review and operate the same
-workflows. We will not modify or rebuild the licensed feature; this spec solves the need with free
-building blocks: the instance owner's global visibility, the public API, and Git.
+workflows. This spec solves it in two layers, both inside the Sustainable Use License's "internal
+business purposes" grant and without modifying or deriving from any `.ee` file:
 
-## Facts the design relies on
+1. **`fxr-sharing` module** (built, `packages/cli/src/modules/fxr-sharing/`): an FXR-authored
+   backend module that writes `workflow:editor` / `credential:user` rows into the free
+   `shared_workflow` and `shared_credentials` tables. n8n's list, open, run and update paths are
+   role-driven and license-free, so sharees see and edit shared items in the normal UI. Enabled per
+   environment with `N8N_ENABLED_MODULES=fxr-sharing`, set by the deploy pipeline.
+2. **Git as the system of record** for promotion between staging and production (below).
+
+## Layer 1: `fxr-sharing`
+
+| Method | Path | Who may call |
+|---|---|---|
+| GET | `/rest/fxr-sharing/users` | any member, lists active users |
+| GET / PUT | `/rest/fxr-sharing/workflows/:id` | workflow owner or instance owner |
+| GET / PUT | `/rest/fxr-sharing/credentials/:id` | credential owner or instance owner |
+
+PUT takes `{ userIds: string[] }` and replaces the sharee list. Sharees get `workflow:editor`
+(open, edit, run, activate) or `credential:user` (use in a workflow, not view secrets). The owner
+keeps ownership; there is no transfer. Unit tests cover add/remove diffing, owner-only enforcement,
+instance-owner override, unknown users and self-sharing.
+
+**Still to build:** a small share panel in the editor. n8n's own `WorkflowShareModal.ee.vue` is
+Enterprise-licensed and stays untouched; ours is a new component under `features/fxr/` with a user
+multi-select calling the endpoints above. Until it exists, sharing is done with a REST call.
+
+## Layer 2: Git promotion
+
+### Facts the design relies on
 
 - The instance owner has global `workflow:read`, `workflow:list` and the credential equivalents
   (`global-scopes.ee.ts`, applied in `workflow-sharing.service.ts`). An owner sees and can run

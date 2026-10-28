@@ -32,6 +32,7 @@ export const MODULE_NAMES = [
 	'oauth-jwe',
 	'runtime-credentials',
 	'n8n-packages',
+	'fxr-sharing',
 ] as const;
 
 export type ModuleName = (typeof MODULE_NAMES)[number];
