@@ -279,6 +279,15 @@ export type FrontendModuleSettings = {
 	};
 
 	/**
+	 * FXR: client settings for the fxr-projects module.
+	 * `teamProjectsLimit` is used as a fallback when the licensed team project limit is 0.
+	 */
+	'fxr-projects'?: {
+		enabled: boolean;
+		teamProjectsLimit: number;
+	};
+
+	/**
 	 * Client settings for Chat module.
 	 */
 	'chat-hub'?: {

@@ -105,7 +105,7 @@ jobs:
           RG: ${{ vars.CONTAINERAPP_RG || 'n8n-rg' }}
           # FXR-authored backend modules to enable (comma separated). Set with the image so
           # an env change never lands on an image that lacks the module.
-          ENABLED_MODULES: ${{ vars.N8N_ENABLED_MODULES || 'fxr-sharing' }}
+          ENABLED_MODULES: ${{ vars.N8N_ENABLED_MODULES || 'fxr-sharing,fxr-projects' }}
         run: |
           SUFFIX="$(echo '${{ needs.build.outputs.tag }}' | tr -c 'a-z0-9\n' '-')"
           for A in "$APP" $WORKER; do
@@ -125,7 +125,7 @@ jobs:
         run: |
           for A in "$APP" $WORKER; do
             ok=0
-            for i in $(seq 1 30); do
+            for _ in $(seq 1 30); do
               STATE=$(az containerapp revision list -g "$RG" -n "$A" --query "[?properties.active].properties.healthState | [0]" -o tsv)
               echo "$A health: $STATE"
               [ "$STATE" = "Healthy" ] && { ok=1; break; }

@@ -33,6 +33,7 @@ export const MODULE_NAMES = [
 	'runtime-credentials',
 	'n8n-packages',
 	'fxr-sharing',
+	'fxr-projects',
 ] as const;
 
 export type ModuleName = (typeof MODULE_NAMES)[number];

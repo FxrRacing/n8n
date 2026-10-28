@@ -25,3 +25,4 @@ same image and share the `n8n-encryption-key` secret. The pipeline deploys both 
 - Team collaboration spec: see SPEC-team-collaboration.md
 - FXR backend modules live in `packages/cli/src/modules/fxr-*/` and are enabled per environment via
   `N8N_ENABLED_MODULES` (set by the deploy workflow). First one: `fxr-sharing`.
+- fxr-projects spec: see SPEC-fxr-projects.md

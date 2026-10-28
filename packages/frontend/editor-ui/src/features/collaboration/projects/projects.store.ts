@@ -66,7 +66,14 @@ export const useProjectsStore = defineStore(STORES.PROJECTS, () => {
 		projects.value.filter((p) => p.type === ProjectTypes.Personal),
 	);
 	const teamProjects = computed(() => projects.value.filter((p) => p.type === ProjectTypes.Team));
-	const teamProjectsLimit = computed(() => settingsStore.settings.enterprise.projects.team.limit);
+	// FXR: fall back to the fxr-projects module's limit when no license sets one.
+	const teamProjectsLimit = computed(
+		() =>
+			settingsStore.settings.enterprise.projects.team.limit ||
+			(settingsStore.isModuleActive('fxr-projects')
+				? (settingsStore.moduleSettings['fxr-projects']?.teamProjectsLimit ?? 0)
+				: 0),
+	);
 	const isTeamProjectFeatureEnabled = computed<boolean>(() => teamProjectsLimit.value !== 0);
 	const hasUnlimitedProjects = computed<boolean>(() => teamProjectsLimit.value === -1);
 	const isTeamProjectLimitExceeded = computed<boolean>(
@@ -157,7 +164,10 @@ export const useProjectsStore = defineStore(STORES.PROJECTS, () => {
 	}
 
 	const createProject = async (project: CreateProjectDto): Promise<Project> => {
-		const newProject = await projectsApi.createProject(rootStore.restApiContext, project);
+		// FXR: the licensed create endpoint is replaced by the fxr-projects module when active.
+		const newProject = settingsStore.isModuleActive('fxr-projects')
+			? await projectsApi.createFxrProject(rootStore.restApiContext, project)
+			: await projectsApi.createProject(rootStore.restApiContext, project);
 		await getProjectsCount();
 		myProjects.value = [...myProjects.value, newProject as unknown as ProjectListItem];
 		return newProject;

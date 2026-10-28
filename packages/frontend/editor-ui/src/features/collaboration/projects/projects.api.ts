@@ -61,6 +61,14 @@ export const createProject = async (
 	return await makeRestApiRequest(context, 'POST', '/projects', payload);
 };
 
+/** FXR: create a team project through the fxr-projects module. */
+export const createFxrProject = async (
+	context: IRestApiContext,
+	payload: CreateProjectDto,
+): Promise<Project> => {
+	return await makeRestApiRequest(context, 'POST', '/fxr-projects', payload);
+};
+
 export const updateProject = async (
 	context: IRestApiContext,
 	id: Project['id'],

@@ -37,8 +37,16 @@ export const useRolesStore = defineStore('roles', () => {
 		() => new Map(projectRoleOrder.value.map((role, idx) => [role, idx])),
 	);
 
+	// FXR: built-in project roles are usable when the fxr-projects module is active.
+	const FXR_UNLOCKED_PROJECT_ROLES = ['project:admin', 'project:editor', 'project:viewer'];
 	const processedProjectRoles = computed<AllRolesMap['project']>(() =>
 		roles.value.project
+			.map((role) =>
+				settingsStore.isModuleActive('fxr-projects') &&
+				FXR_UNLOCKED_PROJECT_ROLES.includes(role.slug)
+					? { ...role, licensed: true }
+					: role,
+			)
 			.filter((role) => role.slug !== PROJECT_OWNER_ROLE_SLUG)
 			.filter(
 				(role) => settingsStore.isChatFeatureEnabled || role.slug !== PROJECT_CHAT_USER_ROLE_SLUG,
