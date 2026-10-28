@@ -193,8 +193,12 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		() => settings.value.chatTrigger?.disablePublicChat ?? false,
 	);
 
+	// FXR: custom roles are also available through the fxr-projects module.
 	const isCustomRolesFeatureEnabled = computed(
-		() => settings.value.enterprise?.customRoles ?? false,
+		() =>
+			(settings.value.enterprise?.customRoles ?? false) ||
+			(isModuleActive('fxr-projects') === true &&
+				moduleSettings.value['fxr-projects']?.customRoles === true),
 	);
 
 	const areTagsEnabled = computed(() =>

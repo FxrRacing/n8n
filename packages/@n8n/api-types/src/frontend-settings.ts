@@ -285,6 +285,8 @@ export type FrontendModuleSettings = {
 	'fxr-projects'?: {
 		enabled: boolean;
 		teamProjectsLimit: number;
+		/** Whether custom project roles can be created through the module. */
+		customRoles: boolean;
 	};
 
 	/**

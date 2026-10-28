@@ -7,6 +7,7 @@ import {
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import * as rolesApi from '@n8n/rest-api-client/api/roles';
+import { makeRestApiRequest } from '@n8n/rest-api-client';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import type {
 	CreateRoleDto,
@@ -37,16 +38,10 @@ export const useRolesStore = defineStore('roles', () => {
 		() => new Map(projectRoleOrder.value.map((role, idx) => [role, idx])),
 	);
 
-	// FXR: built-in project roles are usable when the fxr-projects module is active.
-	const FXR_UNLOCKED_PROJECT_ROLES = ['project:admin', 'project:editor', 'project:viewer'];
+	// FXR: every project role (built-in and custom) is usable when the fxr-projects module is active.
 	const processedProjectRoles = computed<AllRolesMap['project']>(() =>
 		roles.value.project
-			.map((role) =>
-				settingsStore.isModuleActive('fxr-projects') &&
-				FXR_UNLOCKED_PROJECT_ROLES.includes(role.slug)
-					? { ...role, licensed: true }
-					: role,
-			)
+			.map((role) => (useFxrRoles() ? { ...role, licensed: true } : role))
 			.filter((role) => role.slug !== PROJECT_OWNER_ROLE_SLUG)
 			.filter(
 				(role) => settingsStore.isChatFeatureEnabled || role.slug !== PROJECT_CHAT_USER_ROLE_SLUG,
@@ -70,7 +65,19 @@ export const useRolesStore = defineStore('roles', () => {
 		roles.value = await rolesApi.getRoles(rootStore.restApiContext);
 	};
 
+	// FXR: when the fxr-projects module is active, role writes go through it instead of the
+	// licensed /roles endpoints.
+	const useFxrRoles = () => settingsStore.isModuleActive('fxr-projects') === true;
+
 	const createProjectRole = async (body: CreateRoleDto): Promise<Role> => {
+		if (useFxrRoles()) {
+			return await makeRestApiRequest(
+				rootStore.restApiContext,
+				'POST',
+				'/fxr-projects/roles',
+				body,
+			);
+		}
 		return await rolesApi.createProjectRole(rootStore.restApiContext, body);
 	};
 
@@ -79,10 +86,25 @@ export const useRolesStore = defineStore('roles', () => {
 	};
 
 	const deleteProjectRole = async (slug: string): Promise<Role> => {
+		if (useFxrRoles()) {
+			return await makeRestApiRequest(
+				rootStore.restApiContext,
+				'DELETE',
+				`/fxr-projects/roles/${slug}`,
+			);
+		}
 		return await rolesApi.deleteProjectRole(rootStore.restApiContext, slug);
 	};
 
 	const updateProjectRole = async (slug: string, body: UpdateRoleDto): Promise<Role> => {
+		if (useFxrRoles()) {
+			return await makeRestApiRequest(
+				rootStore.restApiContext,
+				'PATCH',
+				`/fxr-projects/roles/${slug}`,
+				body,
+			);
+		}
 		return await rolesApi.updateProjectRole(rootStore.restApiContext, slug, body);
 	};
 
