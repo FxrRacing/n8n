@@ -60,7 +60,9 @@ describe('useInsightsStore', () => {
 
 	describe('charts data fetcher', () => {
 		it('should use fetchInsightsTimeSaved when dashboard is disabled', async () => {
-			settingsStore.moduleSettings = { insights: { dashboard: false } } as FrontendModuleSettings;
+			settingsStore.moduleSettings = {
+				'fxr-insights': { dashboard: false },
+			} as FrontendModuleSettings;
 
 			vi.mocked(insightsApi.fetchInsightsTimeSaved).mockResolvedValue(mockData);
 
@@ -74,7 +76,9 @@ describe('useInsightsStore', () => {
 		});
 
 		it('should use fetchInsightsByTime when dashboard is enabled', async () => {
-			settingsStore.moduleSettings = { insights: { dashboard: true } } as FrontendModuleSettings;
+			settingsStore.moduleSettings = {
+				'fxr-insights': { dashboard: true },
+			} as FrontendModuleSettings;
 
 			vi.mocked(insightsApi.fetchInsightsByTime).mockResolvedValue(mockData);
 
@@ -88,7 +92,7 @@ describe('useInsightsStore', () => {
 		});
 
 		it('should use fetchInsightsTimeSaved when dashboard setting is undefined', async () => {
-			settingsStore.moduleSettings = { insights: {} } as FrontendModuleSettings;
+			settingsStore.moduleSettings = { 'fxr-insights': {} } as FrontendModuleSettings;
 
 			vi.mocked(insightsApi.fetchInsightsTimeSaved).mockResolvedValue(mockData);
 
@@ -102,7 +106,9 @@ describe('useInsightsStore', () => {
 		});
 
 		it('should work without filter parameter', async () => {
-			settingsStore.moduleSettings = { insights: { dashboard: true } } as FrontendModuleSettings;
+			settingsStore.moduleSettings = {
+				'fxr-insights': { dashboard: true },
+			} as FrontendModuleSettings;
 
 			vi.mocked(insightsApi.fetchInsightsByTime).mockResolvedValue(mockData);
 

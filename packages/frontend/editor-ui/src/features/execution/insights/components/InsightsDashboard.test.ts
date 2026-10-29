@@ -78,7 +78,7 @@ vi.mock('@/app/composables/useTelemetry', () => ({
 const renderComponent = createComponentRenderer(InsightsDashboard);
 
 const moduleSettings: FrontendModuleSettings = {
-	insights: {
+	'fxr-insights': {
 		summary: true,
 		dashboard: true,
 		dateRanges: [

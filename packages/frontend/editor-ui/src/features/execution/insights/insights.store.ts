@@ -18,9 +18,11 @@ export const useInsightsStore = defineStore('insights', () => {
 		() => getResourcePermissions(usersStore.currentUser?.globalScopes).insights,
 	);
 
-	const isInsightsEnabled = computed(() => settingsStore.isModuleActive('insights'));
+	const isInsightsEnabled = computed(() => settingsStore.isModuleActive('fxr-insights'));
 
-	const isDashboardEnabled = computed(() => !!settingsStore.moduleSettings.insights?.dashboard);
+	const isDashboardEnabled = computed(
+		() => !!settingsStore.moduleSettings['fxr-insights']?.dashboard,
+	);
 
 	const isSummaryEnabled = computed(
 		() => globalInsightsPermissions.value.list && isInsightsEnabled.value,
@@ -66,7 +68,7 @@ export const useInsightsStore = defineStore('insights', () => {
 		{ immediate: false, resetOnExecute: false },
 	);
 
-	const dateRanges = computed(() => settingsStore.moduleSettings.insights?.dateRanges ?? []);
+	const dateRanges = computed(() => settingsStore.moduleSettings['fxr-insights']?.dateRanges ?? []);
 
 	return {
 		globalInsightsPermissions,

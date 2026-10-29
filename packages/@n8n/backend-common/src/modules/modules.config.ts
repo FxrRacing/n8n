@@ -35,6 +35,7 @@ export const MODULE_NAMES = [
 	'fxr-sharing',
 	'fxr-projects',
 	'fxr-sso',
+	'fxr-insights', // FXR
 ] as const;
 
 export type ModuleName = (typeof MODULE_NAMES)[number];

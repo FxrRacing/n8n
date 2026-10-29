@@ -137,7 +137,7 @@ const mainMenuItems = computed<IMenuItem[]>(() => [
 		position: 'bottom',
 		route: { to: { name: VIEWS.INSIGHTS } },
 		available:
-			settingsStore.isModuleActive('insights') &&
+			settingsStore.isModuleActive('fxr-insights') &&
 			hasPermission(['rbac'], { rbac: { scope: 'insights:list' } }),
 	},
 	{

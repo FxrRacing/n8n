@@ -275,6 +275,16 @@ export type FrontendModuleSettings = {
 	};
 
 	/**
+	 * FXR: client settings for the fxr-insights module. Same shape as `insights`, served
+	 * without license gating; the insights UI reads this key instead of `insights`.
+	 */
+	'fxr-insights'?: {
+		summary: boolean;
+		dashboard: boolean;
+		dateRanges: InsightsDateRange[];
+	};
+
+	/**
 	 * Client settings for MCP module.
 	 */
 	mcp?: {

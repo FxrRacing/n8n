@@ -126,7 +126,7 @@ describe('insights.api', () => {
 			expect(makeRestApiRequest).toHaveBeenCalledWith(
 				mockContext,
 				'GET',
-				'/insights/summary',
+				'/fxr-insights/summary',
 				undefined,
 			);
 			expect(result).toEqual(mockSummary);
@@ -153,7 +153,7 @@ describe('insights.api', () => {
 
 			const result = await fetchInsightsSummary(mockContext, filter);
 
-			expect(makeRestApiRequest).toHaveBeenCalledWith(mockContext, 'GET', '/insights/summary', {
+			expect(makeRestApiRequest).toHaveBeenCalledWith(mockContext, 'GET', '/fxr-insights/summary', {
 				startDate: '2025-01-01T00:00:00.000Z',
 				endDate: '2025-01-31T23:59:59.999Z',
 			});
@@ -195,7 +195,7 @@ describe('insights.api', () => {
 			expect(makeRestApiRequest).toHaveBeenCalledWith(
 				mockContext,
 				'GET',
-				'/insights/by-time',
+				'/fxr-insights/by-time',
 				undefined,
 			);
 			expect(result).toEqual(mockInsightsByTime);
@@ -228,7 +228,7 @@ describe('insights.api', () => {
 
 			const result = await fetchInsightsByTime(mockContext, filter);
 
-			expect(makeRestApiRequest).toHaveBeenCalledWith(mockContext, 'GET', '/insights/by-time', {
+			expect(makeRestApiRequest).toHaveBeenCalledWith(mockContext, 'GET', '/fxr-insights/by-time', {
 				startDate: '2025-01-01T00:00:00.000Z',
 				endDate: '2025-01-31T23:59:59.999Z',
 			});
@@ -270,7 +270,7 @@ describe('insights.api', () => {
 			expect(makeRestApiRequest).toHaveBeenCalledWith(
 				mockContext,
 				'GET',
-				'/insights/by-time/time-saved',
+				'/fxr-insights/by-time/time-saved',
 				undefined,
 			);
 			expect(result).toEqual(mockTimeSaved);
@@ -306,7 +306,7 @@ describe('insights.api', () => {
 			expect(makeRestApiRequest).toHaveBeenCalledWith(
 				mockContext,
 				'GET',
-				'/insights/by-time/time-saved',
+				'/fxr-insights/by-time/time-saved',
 				{
 					startDate: '2025-01-01T00:00:00.000Z',
 					endDate: '2025-01-31T23:59:59.999Z',
@@ -344,7 +344,7 @@ describe('insights.api', () => {
 			expect(makeRestApiRequest).toHaveBeenCalledWith(
 				mockContext,
 				'GET',
-				'/insights/by-workflow',
+				'/fxr-insights/by-workflow',
 				undefined,
 			);
 			expect(result).toEqual(mockInsightsByWorkflow);
@@ -398,13 +398,18 @@ describe('insights.api', () => {
 
 			const result = await fetchInsightsByWorkflow(mockContext, filter);
 
-			expect(makeRestApiRequest).toHaveBeenCalledWith(mockContext, 'GET', '/insights/by-workflow', {
-				startDate: '2025-01-01T00:00:00.000Z',
-				endDate: '2025-01-31T23:59:59.999Z',
-				take: 10,
-				skip: 0,
-				sortBy: 'workflowName:asc',
-			});
+			expect(makeRestApiRequest).toHaveBeenCalledWith(
+				mockContext,
+				'GET',
+				'/fxr-insights/by-workflow',
+				{
+					startDate: '2025-01-01T00:00:00.000Z',
+					endDate: '2025-01-31T23:59:59.999Z',
+					take: 10,
+					skip: 0,
+					sortBy: 'workflowName:asc',
+				},
+			);
 			expect(result).toEqual(mockInsightsByWorkflow);
 		});
 	});
