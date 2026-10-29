@@ -12,6 +12,14 @@ const route = useRoute();
 
 const onSSOLogin = async () => {
 	try {
+		// FXR: module-provided OIDC login takes precedence when enabled.
+		if (ssoStore.isFxrSsoEnabled && ssoStore.fxrSso?.loginUrl) {
+			const redirect = typeof route.query?.redirect === 'string' ? route.query.redirect : '';
+			const url = new URL(ssoStore.fxrSso.loginUrl);
+			if (redirect) url.searchParams.set('redirect', redirect);
+			window.location.href = url.toString();
+			return;
+		}
 		const redirectUrl = ssoStore.isDefaultAuthenticationSaml
 			? await ssoStore.getSSORedirectUrl(
 					typeof route.query?.redirect === 'string' ? route.query.redirect : '',
@@ -32,7 +40,11 @@ const onSSOLogin = async () => {
 		<N8nButton
 			variant="outline"
 			size="large"
-			:label="i18n.baseText('sso.login.button')"
+			:label="
+				ssoStore.isFxrSsoEnabled && ssoStore.fxrSso?.loginLabel
+					? `${i18n.baseText('sso.login.button')} (${ssoStore.fxrSso.loginLabel})`
+					: i18n.baseText('sso.login.button')
+			"
 			@click="onSSOLogin"
 		/>
 	</div>

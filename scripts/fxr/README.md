@@ -31,3 +31,4 @@ same image and share the `n8n-encryption-key` secret. The pipeline deploys both 
   the image; n8n loads them via `N8N_CUSTOM_EXTENSIONS`. First one: `netsuite` (SuiteTalk REST,
   SuiteQL, raw requests, Token-Based Auth). Local dev: `cd fxr/nodes/netsuite && pnpm install
   --ignore-workspace && pnpm build`, then symlink `dist` into `~/.n8n/custom`.
+- fxr-sso spec: see SPEC-fxr-sso.md

@@ -149,6 +149,12 @@ export interface FrontendSettings {
 			loginLabel: string;
 			loginEnabled: boolean;
 		};
+		/** FXR: OpenID Connect sign-in provided by the fxr-sso module. Optional so upstream fixtures stay valid. */
+		fxr?: {
+			loginEnabled: boolean;
+			loginUrl: string;
+			loginLabel: string;
+		};
 	};
 	logStreaming: {
 		managedByEnv: boolean;
@@ -287,6 +293,16 @@ export type FrontendModuleSettings = {
 		teamProjectsLimit: number;
 		/** Whether custom project roles can be created through the module. */
 		customRoles: boolean;
+	};
+
+	/** FXR: client settings for the fxr-sso module. */
+	'fxr-sso'?: {
+		enabled: boolean;
+		loginUrl: string;
+		callbackUrl: string;
+		loginLabel: string;
+		autoProvision: boolean;
+		managedByEnv: boolean;
 	};
 
 	/**

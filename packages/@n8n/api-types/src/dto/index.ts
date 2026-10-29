@@ -255,3 +255,9 @@ export {
 	type EncryptionKeysSortOption,
 } from './encryption/list-encryption-keys-query.dto';
 export type { EncryptionKeyResponseDto } from './encryption/encryption-key-response.dto';
+
+export {
+	FxrSsoConfigDto,
+	FXR_SSO_DEFAULT_ROLES,
+	type FxrSsoConfigResponse,
+} from './fxr/fxr-sso-config.dto';

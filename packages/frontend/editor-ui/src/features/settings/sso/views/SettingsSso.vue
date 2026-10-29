@@ -18,6 +18,9 @@ import {
 } from '@n8n/design-system';
 import SamlSettingsForm from '../components/SamlSettingsForm.vue';
 import OidcSettingsForm from '../components/OidcSettingsForm.vue';
+// FXR: module-provided OIDC settings, shown in place of the upsell when fxr-sso is active.
+import FxrSsoSettings from '@/features/fxr/sso/FxrSsoSettings.vue';
+import { useSettingsStore } from '@/app/stores/settings.store';
 
 const i18n = useI18n();
 const ssoStore = useSSOStore();
@@ -48,6 +51,7 @@ const options = computed(() => {
 const hasAnySsoEnabled = computed(
 	() => ssoStore.isEnterpriseSamlEnabled || ssoStore.isEnterpriseOidcEnabled,
 );
+const isFxrSsoActive = computed(() => useSettingsStore().isModuleActive('fxr-sso') === true);
 
 const activeForm = computed(() => {
 	if (authProtocol.value === SupportedProtocols.SAML) return samlFormRef.value;
@@ -157,8 +161,9 @@ onMounted(() => {
 		>
 			<OidcSettingsForm ref="oidcForm" />
 		</div>
+		<FxrSsoSettings v-if="isFxrSsoActive && !hasAnySsoEnabled" />
 		<N8nActionBox
-			v-if="!hasAnySsoEnabled"
+			v-if="!hasAnySsoEnabled && !isFxrSsoActive"
 			data-test-id="sso-content-unlicensed"
 			:class="$style.actionBox"
 			:description="i18n.baseText('settings.sso.actionBox.description')"

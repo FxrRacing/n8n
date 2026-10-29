@@ -119,7 +119,7 @@ jobs:
           RG: ${{ vars.CONTAINERAPP_RG || 'n8n-rg' }}
           # FXR-authored backend modules to enable (comma separated). Set with the image so
           # an env change never lands on an image that lacks the module.
-          ENABLED_MODULES: ${{ vars.N8N_ENABLED_MODULES || 'fxr-sharing,fxr-projects' }}
+          ENABLED_MODULES: ${{ vars.N8N_ENABLED_MODULES || 'fxr-sharing,fxr-projects,fxr-sso' }}
           # Directory inside the image holding FXR custom node packages (see build job).
           CUSTOM_EXTENSIONS: /usr/local/lib/node_modules/n8n/fxr-nodes
         run: |

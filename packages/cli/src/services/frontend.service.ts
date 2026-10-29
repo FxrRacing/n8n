@@ -95,6 +95,8 @@ export type PublicFrontendSettings = {
 			/** Required for OIDC authentication redirect URL */
 			loginUrl: FrontendSettings['sso']['oidc']['loginUrl'];
 		};
+		/** FXR: module-provided OIDC sign-in */
+		fxr?: FrontendSettings['sso']['fxr'];
 	};
 	/** Used to fetch community nodes on preview instance */
 	communityNodesEnabled: FrontendSettings['communityNodesEnabled'];
@@ -274,6 +276,12 @@ export class FrontendService {
 					loginEnabled: false,
 					loginUrl: `${instanceBaseUrl}/${restEndpoint}/sso/oidc/login`,
 					callbackUrl: `${instanceBaseUrl}/${restEndpoint}/sso/oidc/callback`,
+				},
+				// FXR: filled in from the fxr-sso module settings on every settings refresh.
+				fxr: {
+					loginEnabled: false,
+					loginUrl: `${instanceBaseUrl}/${restEndpoint}/fxr-sso/login`,
+					loginLabel: '',
 				},
 			},
 			logStreaming: {
@@ -530,6 +538,17 @@ export class FrontendService {
 			});
 		}
 
+		// FXR: advertise the fxr-sso login to the sign-in page when the module is active.
+		const moduleSettings = this.moduleRegistry.settings;
+		const fxrSso = (moduleSettings instanceof Map ? moduleSettings.get('fxr-sso') : undefined) as
+			| { enabled?: boolean; loginUrl?: string; loginLabel?: string }
+			| undefined;
+		this.settings.sso.fxr = {
+			loginEnabled: fxrSso?.enabled === true,
+			loginUrl: fxrSso?.loginUrl ?? this.settings.sso.fxr?.loginUrl ?? '',
+			loginLabel: fxrSso?.loginLabel ?? '',
+		};
+
 		if (this.license.isVariablesEnabled()) {
 			this.settings.variables.limit = this.license.getVariablesLimit();
 		}
@@ -600,7 +619,7 @@ export class FrontendService {
 		const {
 			defaultLocale,
 			userManagement: { authenticationMethod, showSetupOnFirstLoad, smtpSetup, passwordMinLength },
-			sso: { saml: ssoSaml, ldap: ssoLdap, oidc: ssoOidc },
+			sso: { saml: ssoSaml, ldap: ssoLdap, oidc: ssoOidc, fxr: ssoFxr },
 			authCookie,
 			previewMode,
 			enterprise: { saml, ldap, oidc },
@@ -625,6 +644,8 @@ export class FrontendService {
 					loginEnabled: ssoOidc.loginEnabled,
 					loginUrl: ssoOidc.loginUrl,
 				},
+				// FXR: only present when the fxr-sso module is active, so upstream shape is unchanged otherwise.
+				...(ssoFxr?.loginEnabled ? { fxr: ssoFxr } : {}),
 			},
 			authCookie,
 			previewMode,

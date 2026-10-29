@@ -2,6 +2,7 @@ import type { OidcConfigDto, SamlPreferences } from '@n8n/api-types';
 import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { useRootStore } from '@n8n/stores/useRootStore';
+import { useSettingsStore } from '@/app/stores/settings.store';
 import * as ssoApi from '@n8n/rest-api-client/api/sso';
 import type { SamlPreferencesExtractedData } from '@n8n/rest-api-client/api/sso';
 import * as ldapApi from '@n8n/rest-api-client/api/ldap';
@@ -23,8 +24,13 @@ export const useSSOStore = defineStore('sso', () => {
 	const selectedAuthProtocol = ref<SupportedProtocolType | undefined>(undefined);
 	const ssoManagedByEnv = ref(false);
 
+	// FXR: OpenID Connect sign-in from the fxr-sso module, advertised via public settings.
+	const fxrSso = computed(() => useSettingsStore().settings.sso?.fxr);
+	const isFxrSsoEnabled = computed(() => fxrSso.value?.loginEnabled === true);
+
 	const showSsoLoginButton = computed(
 		() =>
+			isFxrSsoEnabled.value ||
 			(isSamlLoginEnabled.value &&
 				isEnterpriseSamlEnabled.value &&
 				isDefaultAuthenticationSaml.value) ||
@@ -210,6 +216,8 @@ export const useSSOStore = defineStore('sso', () => {
 	};
 
 	return {
+		fxrSso,
+		isFxrSsoEnabled,
 		showSsoLoginButton,
 		getSSORedirectUrl,
 		initialize,
