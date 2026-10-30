@@ -1,3 +1,4 @@
+import { Logger } from '@n8n/backend-common';
 import { Get, RestController } from '@n8n/decorators';
 import type { Response } from 'express';
 
@@ -16,12 +17,14 @@ export class FxrSsoController {
 		private readonly ssoService: FxrSsoService,
 		private readonly authService: AuthService,
 		private readonly urlService: UrlService,
+		private readonly logger: Logger,
 	) {}
 
 	/** Browser lands here from the sign-in button. */
 	@Get('/login', { skipAuth: true })
 	async login(req: AuthlessRequest, res: Response) {
 		if (!(await this.ssoService.isConfigured())) {
+			this.logger.warn('FXR SSO: login requested but SSO is not configured');
 			return this.failToSignin(res, 'sso_not_configured');
 		}
 		const query = req.query as Record<string, string | undefined>;
@@ -41,7 +44,12 @@ export class FxrSsoController {
 	async handleCallback(req: AuthlessRequest, res: Response) {
 		const stateToken = (req.cookies as Record<string, string> | undefined)?.[STATE_COOKIE];
 		res.clearCookie(STATE_COOKIE);
-		if (!stateToken) return this.failToSignin(res, 'sso_state_missing');
+		if (!stateToken) {
+			this.logger.warn('FXR SSO: callback received without state cookie', {
+				callbackUrl: this.ssoService.callbackUrl,
+			});
+			return this.failToSignin(res, 'sso_state_missing');
+		}
 
 		try {
 			const callbackUrl = new URL(req.originalUrl, this.urlService.getInstanceBaseUrl());
@@ -49,7 +57,12 @@ export class FxrSsoController {
 			this.authService.issueCookie(res, user, false, req.browserId);
 			return res.redirect(this.urlService.getInstanceBaseUrl() + validateRedirectUrl(redirect));
 		} catch (error) {
-			return this.failToSignin(res, 'sso_failed', (error as Error).message);
+			const message = (error as Error).message;
+			this.logger.warn('FXR SSO: sign-in failed', {
+				message,
+				callbackUrl: this.ssoService.callbackUrl,
+			});
+			return this.failToSignin(res, 'sso_failed', message);
 		}
 	}
 

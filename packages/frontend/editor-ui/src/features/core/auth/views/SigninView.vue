@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import AuthView from './AuthView.vue';
@@ -123,6 +123,32 @@ const getRedirectQueryParameter = () => {
 	}
 	return redirect;
 };
+
+// FXR: the fxr-sso callback redirects here with ?ssoError=<code>&ssoMessage=<detail> on failure.
+const SSO_ERROR_CODES = ['sso_not_configured', 'sso_state_missing', 'sso_failed'] as const;
+type SsoErrorCode = (typeof SSO_ERROR_CODES)[number];
+const isSsoErrorCode = (value: unknown): value is SsoErrorCode =>
+	typeof value === 'string' && (SSO_ERROR_CODES as readonly string[]).includes(value);
+
+const showSsoErrorFromQuery = async () => {
+	const { ssoError, ssoMessage, ...rest } = route.query;
+	if (!ssoError) return;
+	const description = isSsoErrorCode(ssoError)
+		? locale.baseText(`auth.signin.sso.error.${ssoError}`)
+		: locale.baseText('auth.signin.sso.error.sso_failed');
+	const detail = typeof ssoMessage === 'string' && ssoMessage ? ` (${ssoMessage})` : '';
+	toast.showMessage({
+		title: locale.baseText('auth.signin.sso.error.title'),
+		message: `${description}${detail}`,
+		type: 'error',
+		duration: 0,
+	});
+	await router.replace({ query: rest });
+};
+
+onMounted(() => {
+	void showSsoErrorFromQuery();
+});
 
 const login = async (form: LoginRequestDto) => {
 	try {
