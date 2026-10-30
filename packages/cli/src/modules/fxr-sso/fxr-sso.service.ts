@@ -27,6 +27,18 @@ export interface LoginState {
 	redirect: string;
 }
 
+/** OAuth `error` / `error_description` from an openid-client provider error, if present. */
+export function toOAuthError(error: unknown): { code: string; description?: string } | undefined {
+	if (typeof error !== 'object' || error === null) return undefined;
+	const record = error as Record<string, unknown>;
+	if (typeof record.error !== 'string') return undefined;
+	return {
+		code: record.error,
+		description:
+			typeof record.error_description === 'string' ? record.error_description : undefined,
+	};
+}
+
 /** Pure helpers, exported for tests. */
 export function emailDomainAllowed(email: string, allowedDomains: string): boolean {
 	const allowed = allowedDomains
@@ -106,9 +118,48 @@ export class FxrSsoService {
 				effective.clientSecret,
 			);
 			const metadata = configuration.serverMetadata();
-			return { ok: true, issuer: metadata.issuer, message: 'Provider discovery succeeded' };
+			const credentialCheck = await this.probeClientCredentials(configuration);
+			if (!credentialCheck.ok) {
+				return { ok: false, issuer: metadata.issuer, message: credentialCheck.message };
+			}
+			return {
+				ok: true,
+				issuer: metadata.issuer,
+				message: 'Provider discovery succeeded and the client ID and secret were accepted',
+			};
 		} catch (error) {
 			return { ok: false, issuer: effective.issuer, message: (error as Error).message };
+		}
+	}
+
+	/**
+	 * Discovery is public, so it says nothing about the client secret. Authenticate against the
+	 * token endpoint with a deliberately invalid authorization code: a provider that accepts the
+	 * client credentials answers `invalid_grant` (the code is bad), while a wrong secret, an
+	 * expired secret, or a redirect URI registered as a single-page app answer with a different
+	 * error that names the actual problem.
+	 */
+	private async probeClientCredentials(
+		configuration: client.Configuration,
+	): Promise<{ ok: boolean; message: string }> {
+		try {
+			await client.genericGrantRequest(configuration, 'authorization_code', {
+				code: 'fxr-sso-connection-test',
+				redirect_uri: this.callbackUrl,
+			});
+			return { ok: true, message: 'Client credentials accepted' };
+		} catch (error) {
+			const oauthError = toOAuthError(error);
+			if (!oauthError) return { ok: false, message: (error as Error).message };
+			if (oauthError.code === 'invalid_grant') {
+				return { ok: true, message: 'Client credentials accepted' };
+			}
+			return {
+				ok: false,
+				message: `Token endpoint rejected the client: ${oauthError.code}${
+					oauthError.description ? `: ${oauthError.description}` : ''
+				}`,
+			};
 		}
 	}
 

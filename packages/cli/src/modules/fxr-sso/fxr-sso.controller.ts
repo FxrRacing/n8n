@@ -7,9 +7,19 @@ import { AuthlessRequest } from '@/requests';
 import { UrlService } from '@/services/url.service';
 import { validateRedirectUrl } from '@/utils/validate-redirect-url';
 
-import { FxrSsoService } from './fxr-sso.service';
+import { FxrSsoService, toOAuthError } from './fxr-sso.service';
 
 const STATE_COOKIE = 'fxr-sso-state';
+
+/**
+ * Prefer the OAuth `error` / `error_description` openid-client attaches to provider errors: for
+ * Entra ID the description carries the AADSTS code that says what is actually misconfigured.
+ */
+function describeSsoError(error: unknown): string {
+	const oauthError = toOAuthError(error);
+	if (oauthError) return [oauthError.code, oauthError.description].filter(Boolean).join(': ');
+	return error instanceof Error ? error.message : 'Unknown error';
+}
 
 @RestController('/fxr-sso')
 export class FxrSsoController {
@@ -57,7 +67,7 @@ export class FxrSsoController {
 			this.authService.issueCookie(res, user, false, req.browserId);
 			return res.redirect(this.urlService.getInstanceBaseUrl() + validateRedirectUrl(redirect));
 		} catch (error) {
-			const message = (error as Error).message;
+			const message = describeSsoError(error);
 			this.logger.warn('FXR SSO: sign-in failed', {
 				message,
 				callbackUrl: this.ssoService.callbackUrl,
@@ -68,7 +78,7 @@ export class FxrSsoController {
 
 	private failToSignin(res: Response, code: string, message?: string) {
 		const params = new URLSearchParams({ ssoError: code });
-		if (message) params.set('ssoMessage', message.slice(0, 200));
+		if (message) params.set('ssoMessage', message.slice(0, 500));
 		return res.redirect(`${this.urlService.getInstanceBaseUrl()}/signin?${params.toString()}`);
 	}
 }
