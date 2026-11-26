@@ -10,30 +10,33 @@ import { Get, GlobalScope, Query, RestController } from '@n8n/decorators';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
 
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-
-import { FxrInsightsService } from './fxr-insights.service';
+import { InsightsService } from '@n8n/backend-module-insights';
+import { BadRequestError } from '@n8n/errors';
 
 /**
  * FXR: mirrors upstream /insights routes without license gating — no @Licensed decorators and
- * no validateDateFiltersLicense; date defaulting/sanitization is ported verbatim.
+ * no validateDateFiltersLicense; date defaulting/sanitization is ported verbatim. Reads go
+ * straight to the upstream InsightsService, so per-user access filtering and time zone handling
+ * are upstream's.
  */
 @RestController('/fxr-insights')
 export class FxrInsightsController {
-	constructor(private readonly fxrInsightsService: FxrInsightsService) {}
+	constructor(private readonly insightsService: InsightsService) {}
 
 	@Get('/summary')
 	@GlobalScope('insights:list')
 	async getInsightsSummary(
-		_req: AuthenticatedRequest,
+		req: AuthenticatedRequest,
 		_res: Response,
 		@Query query: InsightsDateFilterDto = {},
 	): Promise<InsightsSummary> {
-		const { startDate, endDate } = this.prepareDateFilters(query);
+		const { startDate, endDate, timeZone } = this.prepareDateFilters(query);
 
-		return await this.fxrInsightsService.getInsightsSummary({
+		return await this.insightsService.getInsightsSummary({
+			user: req.user,
 			startDate,
 			endDate,
+			timeZone,
 			projectId: query.projectId,
 		});
 	}
@@ -41,38 +44,40 @@ export class FxrInsightsController {
 	@Get('/by-workflow')
 	@GlobalScope('insights:list')
 	async getInsightsByWorkflow(
-		_req: AuthenticatedRequest,
+		req: AuthenticatedRequest,
 		_res: Response,
 		@Query query: ListInsightsWorkflowQueryDto,
 	): Promise<InsightsByWorkflow> {
-		const { startDate, endDate } = this.prepareDateFilters(query);
+		const { startDate, endDate, timeZone } = this.prepareDateFilters(query);
 
-		return await this.fxrInsightsService.getInsightsByWorkflow({
+		return await this.insightsService.getInsightsByWorkflow({
+			user: req.user,
 			skip: query.skip,
 			take: query.take,
 			sortBy: query.sortBy,
 			projectId: query.projectId,
 			startDate,
 			endDate,
+			timeZone,
 		});
 	}
 
 	@Get('/by-time')
 	@GlobalScope('insights:list')
 	async getInsightsByTime(
-		_req: AuthenticatedRequest,
+		req: AuthenticatedRequest,
 		_res: Response,
 		@Query query: InsightsDateFilterDto,
 	): Promise<InsightsByTime[]> {
-		const { startDate, endDate } = this.prepareDateFilters(query);
+		const { startDate, endDate, timeZone } = this.prepareDateFilters(query);
 
-		// Cast to full insights by time type
-		// as the service returns all types by default
-		return (await this.fxrInsightsService.getInsightsByTime({
+		return await this.insightsService.getInsightsByTime({
+			user: req.user,
 			projectId: query.projectId,
 			startDate,
 			endDate,
-		})) as InsightsByTime[];
+			timeZone,
+		});
 	}
 
 	/**
@@ -82,20 +87,19 @@ export class FxrInsightsController {
 	@Get('/by-time/time-saved')
 	@GlobalScope('insights:list')
 	async getTimeSavedInsightsByTime(
-		_req: AuthenticatedRequest,
+		req: AuthenticatedRequest,
 		_res: Response,
 		@Query query: InsightsDateFilterDto,
 	): Promise<RestrictedInsightsByTime[]> {
-		const { startDate, endDate } = this.prepareDateFilters(query);
+		const { startDate, endDate, timeZone } = this.prepareDateFilters(query);
 
-		// Cast to restricted insights by time type
-		// as the service returns only time saved data
-		return (await this.fxrInsightsService.getInsightsByTime({
-			insightTypes: ['time_saved_min'],
+		return await this.insightsService.getTimeSavedInsightsByTime({
+			user: req.user,
 			projectId: query.projectId,
 			startDate,
 			endDate,
-		})) as RestrictedInsightsByTime[];
+			timeZone,
+		});
 	}
 
 	private validateQueryDates(query: InsightsDateFilterDto | ListInsightsWorkflowQueryDto) {
@@ -126,6 +130,7 @@ export class FxrInsightsController {
 	private prepareDateFilters(query: InsightsDateFilterDto | ListInsightsWorkflowQueryDto): {
 		startDate: Date;
 		endDate: Date;
+		timeZone?: string;
 	} {
 		this.validateQueryDates(query);
 		return this.getSanitizedDateFilters(query);
@@ -138,16 +143,19 @@ export class FxrInsightsController {
 	private getSanitizedDateFilters(query: InsightsDateFilterDto | ListInsightsWorkflowQueryDto): {
 		startDate: Date;
 		endDate: Date;
+		timeZone?: string;
 	} {
 		const today = new Date();
+		const timeZone = query.timeZone;
 
 		if (!query.startDate) {
 			return {
 				startDate: DateTime.now().minus({ days: 7 }).toJSDate(),
 				endDate: today,
+				timeZone,
 			};
 		}
 
-		return { startDate: query.startDate, endDate: query.endDate ?? today };
+		return { startDate: query.startDate, endDate: query.endDate ?? today, timeZone };
 	}
 }

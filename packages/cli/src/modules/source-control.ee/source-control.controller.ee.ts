@@ -1,10 +1,10 @@
-import { IWorkflowToImport } from '@/interfaces';
 import {
 	PullWorkFolderRequestDto,
 	PushWorkFolderRequestDto,
 	type GitCommitInfo,
 	type SourceControlledFile,
 } from '@n8n/api-types';
+import { EventService } from '@n8n/backend-services';
 import { AuthenticatedRequest } from '@n8n/db';
 import { Get, Post, Patch, RestController, GlobalScope, Body } from '@n8n/decorators';
 import { hasGlobalScope } from '@n8n/permissions';
@@ -23,9 +23,8 @@ import { SourceControlRequest } from './types/requests';
 import { SourceControlGetStatus } from './types/source-control-get-status';
 import type { SourceControlPreferences } from './types/source-control-preferences';
 
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { EventService } from '@/events/event.service';
+import { BadRequestError, ForbiddenError } from '@n8n/errors';
+import { IWorkflowToImport } from '@/interfaces';
 
 @RestController('/source-control')
 export class SourceControlController {
@@ -48,6 +47,7 @@ export class SourceControlController {
 
 		const publicSubset = {
 			branchReadOnly: preferences.branchReadOnly,
+			environmentsVersion: preferences.environmentsVersion,
 		};
 
 		const ctx = await this.sourceControlContextFactory.createContext(req.user);
@@ -80,6 +80,7 @@ export class SourceControlController {
 				initRepo: req.body.initRepo ?? true, // default to true if not specified
 				connected: undefined,
 				publicKey: undefined,
+				environmentsVersion: undefined,
 			};
 			await this.sourceControlPreferencesService.validateSourceControlPreferences(
 				sanitizedPreferences,
@@ -149,17 +150,36 @@ export class SourceControlController {
 			) {
 				await this.sourceControlService.setBranch(sanitizedPreferences.branchName);
 			}
-			if (sanitizedPreferences.branchColor ?? sanitizedPreferences.branchReadOnly !== undefined) {
+			if (
+				(sanitizedPreferences.branchColor ??
+					sanitizedPreferences.branchReadOnly ??
+					sanitizedPreferences.environmentsVersion) !== undefined
+			) {
 				await this.sourceControlPreferencesService.setPreferences(
 					{
 						branchColor: sanitizedPreferences.branchColor,
 						branchReadOnly: sanitizedPreferences.branchReadOnly,
+						environmentsVersion: sanitizedPreferences.environmentsVersion,
 					},
 					true,
 				);
 			}
-			await this.sourceControlService.start();
+			// A version switch changes no git state, so Classic Git keeps running as it is.
+			const versionOnly =
+				sanitizedPreferences.branchName === undefined &&
+				sanitizedPreferences.branchColor === undefined &&
+				sanitizedPreferences.branchReadOnly === undefined;
+			if (!versionOnly) await this.sourceControlService.start();
 			const resultingPreferences = this.sourceControlPreferencesService.getPreferences();
+			if (
+				sanitizedPreferences.environmentsVersion &&
+				sanitizedPreferences.environmentsVersion !== currentPreferences.environmentsVersion
+			) {
+				this.eventService.emit('source-control-environments-version-switched', {
+					userId: req.user.id,
+					version: sanitizedPreferences.environmentsVersion,
+				});
+			}
 			this.eventService.emit('source-control-settings-updated', {
 				branchName: resultingPreferences.branchName,
 				connected: resultingPreferences.connected,
@@ -202,11 +222,6 @@ export class SourceControlController {
 		await this.sourceControlScopedService.ensureIsAllowedToPush(req);
 
 		try {
-			await this.sourceControlService.setGitUserDetails(
-				`${req.user.firstName} ${req.user.lastName}`,
-				req.user.email,
-			);
-
 			const result = await this.sourceControlService.pushWorkfolder(req.user, payload);
 			res.statusCode = result.statusCode;
 
@@ -256,6 +271,7 @@ export class SourceControlController {
 
 	@Get('/get-status', { middlewares: [sourceControlEnabledMiddleware] })
 	async getStatus(req: SourceControlRequest.GetStatus) {
+		await this.sourceControlScopedService.ensureIsAllowedToGetStatus(req);
 		try {
 			const result = await this.sourceControlService.getStatus(
 				req.user,
@@ -272,6 +288,7 @@ export class SourceControlController {
 
 	@Get('/status')
 	async status(req: SourceControlRequest.GetStatus) {
+		await this.sourceControlScopedService.ensureIsAllowedToGetStatus(req);
 		try {
 			return await this.sourceControlService.getStatus(
 				req.user,

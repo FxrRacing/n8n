@@ -17,6 +17,7 @@ import {
 	BINARY_ENCODING,
 	NodeConnectionTypes,
 	NodeOperationError,
+	requestPath,
 	SEND_AND_WAIT_OPERATION,
 } from 'n8n-workflow';
 import type { Readable } from 'stream';
@@ -26,22 +27,30 @@ import { fileFields, fileOperations } from './FileDescription';
 import {
 	slackApiRequest,
 	slackApiRequestAllItems,
+	formatUserLabel,
 	getMessageContent,
 	getTarget,
 	createSendAndWaitMessageBody,
 	processThreadOptions,
 	slackApiRequestAllItemsWithRateLimit,
 	toMultiOptionsCsv,
+	searchContextItems,
 } from './GenericFunctions';
 import {
+	advancedInteractivityNotice,
+	approversField,
+	captureResponderField,
 	channelRLC,
 	messageFields,
 	messageOperations,
+	postDecisionBehaviorField,
 	replyToMessageField,
 	sendToSelector,
+	unauthorizedReplyField,
 	userRLC,
 } from './MessageDescription';
 import { reactionFields, reactionOperations } from './ReactionDescription';
+import { slackSendAndWaitWebhook } from './SlackHitlWebhook';
 import { starFields, starOperations } from './StarDescription';
 import { userFields, userOperations } from './UserDescription';
 import { userGroupFields, userGroupOperations } from './UserGroupDescription';
@@ -50,7 +59,6 @@ import { sendAndWaitWebhooksDescription } from '../../../utils/sendAndWait/descr
 import {
 	getSendAndWaitProperties,
 	SEND_AND_WAIT_WAITING_TOOLTIP,
-	sendAndWaitWebhook,
 } from '../../../utils/sendAndWait/utils';
 
 export class SlackV2 implements INodeType {
@@ -59,7 +67,7 @@ export class SlackV2 implements INodeType {
 	constructor(baseDescription: INodeTypeBaseDescription) {
 		this.description = {
 			...baseDescription,
-			version: [2, 2.1, 2.2, 2.3, 2.4, 2.5],
+			version: [2, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7],
 			defaults: {
 				name: 'Slack',
 			},
@@ -150,7 +158,7 @@ export class SlackV2 implements INodeType {
 				...messageFields,
 				...getSendAndWaitProperties(
 					[
-						{ ...sendToSelector, default: 'user' },
+						{ ...sendToSelector, default: 'user', displayOptions: { show: {} } },
 						{
 							...channelRLC,
 							displayOptions: {
@@ -169,7 +177,13 @@ export class SlackV2 implements INodeType {
 						},
 					],
 					undefined,
-					undefined,
+					[
+						advancedInteractivityNotice,
+						captureResponderField,
+						approversField,
+						unauthorizedReplyField,
+						postDecisionBehaviorField,
+					],
 					{ extraOptions: [replyToMessageField] },
 				).filter((p) => p.name !== 'subject'),
 				...starOperations,
@@ -202,7 +216,7 @@ export class SlackV2 implements INodeType {
 				const { data: channels, cursor } = await slackApiRequestAllItemsWithRateLimit<{
 					id: string;
 					name: string;
-				}>(this, 'channels', 'GET', '/conversations.list', {}, qs, {
+				}>(this, 'channels', 'GET', requestPath`/conversations.list`, {}, qs, {
 					onFail: 'stop',
 					maxRetries: 2,
 					fallbackDelay: 30_000,
@@ -225,18 +239,27 @@ export class SlackV2 implements INodeType {
 					});
 				return { results, paginationToken: cursor };
 			},
-			async getUsers(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult> {
-				const users = (await slackApiRequestAllItems.call(
-					this,
-					'members',
-					'GET',
-					'/users.list',
-				)) as Array<{ id: string; name: string }>;
+			async getUsers(
+				this: ILoadOptionsFunctions,
+				filter?: string,
+				paginationToken?: string,
+			): Promise<INodeListSearchResult> {
+				const qs = { limit: 200, cursor: paginationToken };
+				const { data: users, cursor } = await slackApiRequestAllItemsWithRateLimit<{
+					id: string;
+					name: string;
+					real_name?: string;
+				}>(this, 'members', 'GET', requestPath`/users.list`, {}, qs, {
+					onFail: 'stop',
+					maxRetries: 2,
+					fallbackDelay: 30_000,
+				});
 				const results: INodeListSearchItems[] = users
 					.map((c) => ({
-						name: c.name,
+						name: formatUserLabel(c),
 						value: c.id,
 					}))
+					// the label carries both real name and handle, so either matches the filter
 					.filter(
 						(c) =>
 							!filter ||
@@ -248,7 +271,7 @@ export class SlackV2 implements INodeType {
 						if (a.name.toLowerCase() > b.name.toLowerCase()) return 1;
 						return 0;
 					});
-				return { results };
+				return { results, paginationToken: cursor };
 			},
 		},
 		loadOptions: {
@@ -256,9 +279,21 @@ export class SlackV2 implements INodeType {
 			// select them easily
 			async getUsers(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
-				const users = await slackApiRequestAllItems.call(this, 'members', 'GET', '/users.list');
+				const { data: users } = await slackApiRequestAllItemsWithRateLimit<{
+					id: string;
+					name: string;
+					real_name?: string;
+				}>(
+					this,
+					'members',
+					'GET',
+					requestPath`/users.list`,
+					{},
+					{ limit: 200 },
+					{ onFail: 'stop' },
+				);
 				for (const user of users) {
-					const userName = user.name;
+					const userName = formatUserLabel(user);
 					const userId = user.id;
 					returnData.push({
 						name: userName,
@@ -266,11 +301,12 @@ export class SlackV2 implements INodeType {
 					});
 				}
 
+				// case-insensitive, so lowercase handle fallbacks aren't sorted below every real name
 				returnData.sort((a, b) => {
-					if (a.name < b.name) {
+					if (a.name.toLowerCase() < b.name.toLowerCase()) {
 						return -1;
 					}
-					if (a.name > b.name) {
+					if (a.name.toLowerCase() > b.name.toLowerCase()) {
 						return 1;
 					}
 					return 0;
@@ -287,7 +323,7 @@ export class SlackV2 implements INodeType {
 					this,
 					'channels',
 					'GET',
-					'/conversations.list',
+					requestPath`/conversations.list`,
 					{},
 					qs,
 				);
@@ -321,7 +357,7 @@ export class SlackV2 implements INodeType {
 					this,
 					'channels',
 					'GET',
-					'/conversations.list',
+					requestPath`/conversations.list`,
 					{},
 					qs,
 				);
@@ -351,7 +387,7 @@ export class SlackV2 implements INodeType {
 				const returnData: INodePropertyOptions[] = [];
 				const {
 					profile: { fields },
-				} = await slackApiRequest.call(this, 'GET', '/team.profile.get');
+				} = await slackApiRequest.call(this, 'GET', requestPath`/team.profile.get`);
 				for (const field of fields) {
 					const fieldName = field.label;
 					const fieldId = field.id;
@@ -365,7 +401,7 @@ export class SlackV2 implements INodeType {
 		},
 	};
 
-	webhook = sendAndWaitWebhook;
+	webhook = slackSendAndWaitWebhook;
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
@@ -385,7 +421,7 @@ export class SlackV2 implements INodeType {
 				await slackApiRequest.call(
 					this,
 					'POST',
-					'/chat.postMessage',
+					requestPath`/chat.postMessage`,
 					createSendAndWaitMessageBody(this),
 				);
 			} catch (error) {
@@ -422,7 +458,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.archive',
+							requestPath`/conversations.archive`,
 							body,
 							qs,
 						);
@@ -441,7 +477,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.close',
+							requestPath`/conversations.close`,
 							body,
 							qs,
 						);
@@ -463,7 +499,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.create',
+							requestPath`/conversations.create`,
 							body,
 							qs,
 						);
@@ -485,7 +521,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.kick',
+							requestPath`/conversations.kick`,
 							body,
 							qs,
 						);
@@ -504,7 +540,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.join',
+							requestPath`/conversations.join`,
 							body,
 							qs,
 						);
@@ -519,7 +555,13 @@ export class SlackV2 implements INodeType {
 							{ extractValue: true },
 						) as string;
 						qs.channel = channel;
-						responseData = await slackApiRequest.call(this, 'POST', '/conversations.info', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/conversations.info`,
+							{},
+							qs,
+						);
 						responseData = responseData.channel;
 					}
 					//https://api.slack.com/methods/conversations.list
@@ -537,13 +579,19 @@ export class SlackV2 implements INodeType {
 								this,
 								'channels',
 								'GET',
-								'/conversations.list',
+								requestPath`/conversations.list`,
 								{},
 								qs,
 							);
 						} else {
 							qs.limit = this.getNodeParameter('limit', i);
-							responseData = await slackApiRequest.call(this, 'GET', '/conversations.list', {}, qs);
+							responseData = await slackApiRequest.call(
+								this,
+								'GET',
+								requestPath`/conversations.list`,
+								{},
+								qs,
+							);
 							responseData = responseData.channels;
 						}
 					}
@@ -572,7 +620,7 @@ export class SlackV2 implements INodeType {
 								this,
 								'messages',
 								'GET',
-								'/conversations.history',
+								requestPath`/conversations.history`,
 								{},
 								qs,
 							);
@@ -581,7 +629,7 @@ export class SlackV2 implements INodeType {
 							responseData = await slackApiRequest.call(
 								this,
 								'GET',
-								'/conversations.history',
+								requestPath`/conversations.history`,
 								{},
 								qs,
 							);
@@ -610,7 +658,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.invite',
+							requestPath`/conversations.invite`,
 							body,
 							qs,
 						);
@@ -630,7 +678,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.leave',
+							requestPath`/conversations.leave`,
 							body,
 							qs,
 						);
@@ -650,7 +698,7 @@ export class SlackV2 implements INodeType {
 								this,
 								'members',
 								'GET',
-								'/conversations.members',
+								requestPath`/conversations.members`,
 								{},
 								qs,
 							);
@@ -660,7 +708,7 @@ export class SlackV2 implements INodeType {
 							responseData = await slackApiRequest.call(
 								this,
 								'GET',
-								'/conversations.members',
+								requestPath`/conversations.members`,
 								{},
 								qs,
 							);
@@ -673,7 +721,7 @@ export class SlackV2 implements INodeType {
 								const { user } = await slackApiRequest.call(
 									this,
 									'GET',
-									'/users.info',
+									requestPath`/users.info`,
 									{},
 									{ user: member },
 								);
@@ -698,7 +746,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.open',
+							requestPath`/conversations.open`,
 							body,
 							qs,
 						);
@@ -720,7 +768,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.rename',
+							requestPath`/conversations.rename`,
 							body,
 							qs,
 						);
@@ -753,7 +801,7 @@ export class SlackV2 implements INodeType {
 								this,
 								'messages',
 								'GET',
-								'/conversations.replies',
+								requestPath`/conversations.replies`,
 								{},
 								qs,
 							);
@@ -762,7 +810,7 @@ export class SlackV2 implements INodeType {
 							responseData = await slackApiRequest.call(
 								this,
 								'GET',
-								'/conversations.replies',
+								requestPath`/conversations.replies`,
 								{},
 								qs,
 							);
@@ -785,7 +833,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.setPurpose',
+							requestPath`/conversations.setPurpose`,
 							body,
 							qs,
 						);
@@ -807,7 +855,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.setTopic',
+							requestPath`/conversations.setTopic`,
 							body,
 							qs,
 						);
@@ -827,7 +875,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/conversations.unarchive',
+							requestPath`/conversations.unarchive`,
 							body,
 							qs,
 						);
@@ -895,7 +943,113 @@ export class SlackV2 implements INodeType {
 								'You cannot send ephemeral messages using User type "By username". Please use "From List" or "By ID".',
 							);
 						} else {
-							responseData = await slackApiRequest.call(this, 'POST', `/chat.${action}`, body, qs);
+							responseData = await slackApiRequest.call(
+								this,
+								'POST',
+								requestPath`/chat.${action}`,
+								body,
+								qs,
+							);
+						}
+					}
+					//https://api.slack.com/methods/chat.scheduleMessage
+					if (operation === 'schedule') {
+						const select = this.getNodeParameter('select', i) as 'user' | 'channel';
+						const target = getTarget(this, i, select);
+						const { sendAsUser } = this.getNodeParameter('otherOptions', i) as IDataObject;
+						const postAt = this.getNodeParameter('postAt', i) as string;
+						const content = getMessageContent.call(this, i, nodeVersion, instanceId);
+
+						const body: IDataObject = {
+							channel: target,
+							post_at: Math.floor(new Date(postAt).getTime() / 1000),
+							...content,
+						};
+						if (authentication === 'accessToken' && sendAsUser !== '' && sendAsUser !== undefined) {
+							body.username = sendAsUser;
+						}
+
+						const otherOptions = this.getNodeParameter('otherOptions', i) as IDataObject;
+						const threadParams = processThreadOptions(otherOptions.thread_ts as IDataObject);
+						Object.assign(body, threadParams);
+						delete otherOptions.thread_ts;
+						delete otherOptions.ephemeral;
+						if (otherOptions.botProfile) {
+							const botProfile = otherOptions.botProfile as IDataObject;
+							const botProfileValues = botProfile.imageValues as IDataObject;
+							Object.assign(
+								body,
+								botProfileValues.profilePhotoType === 'image'
+									? { icon_url: botProfileValues.icon_url }
+									: { icon_emoji: botProfileValues.icon_emoji },
+							);
+						}
+						delete otherOptions.botProfile;
+						Object.assign(body, otherOptions);
+
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/chat.scheduleMessage`,
+							body,
+							qs,
+						);
+					}
+					//https://api.slack.com/methods/chat.deleteScheduledMessage
+					if (operation === 'deleteScheduled') {
+						const channel = this.getNodeParameter(
+							'channelId',
+							i,
+							{},
+							{ extractValue: true },
+						) as string;
+						const scheduledMessageId = this.getNodeParameter('scheduledMessageId', i) as string;
+						const body: IDataObject = {
+							channel,
+							scheduled_message_id: scheduledMessageId,
+						};
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/chat.deleteScheduledMessage`,
+							body,
+							qs,
+						);
+					}
+					//https://api.slack.com/methods/chat.scheduledMessages.list
+					if (operation === 'getManyScheduled') {
+						const returnAll = this.getNodeParameter('returnAll', i);
+						const filters = this.getNodeParameter('filters', i) as IDataObject;
+						if (filters.channelId) {
+							qs.channel = this.getNodeParameter('filters.channelId', i, '', {
+								extractValue: true,
+							}) as string;
+						}
+						if (filters.latest) {
+							qs.latest = Math.floor(new Date(filters.latest as string).getTime() / 1000);
+						}
+						if (filters.oldest) {
+							qs.oldest = Math.floor(new Date(filters.oldest as string).getTime() / 1000);
+						}
+						if (returnAll) {
+							responseData = await slackApiRequestAllItems.call(
+								this,
+								'scheduled_messages',
+								'GET',
+								requestPath`/chat.scheduledMessages.list`,
+								{},
+								qs,
+							);
+						} else {
+							qs.limit = this.getNodeParameter('limit', i);
+							responseData = await slackApiRequest.call(
+								this,
+								'GET',
+								requestPath`/chat.scheduledMessages.list`,
+								{},
+								qs,
+							);
+							responseData = responseData.scheduled_messages;
 						}
 					}
 					//https://api.slack.com/methods/chat.update
@@ -918,7 +1072,13 @@ export class SlackV2 implements INodeType {
 						// Add all the other options to the request
 						const updateFields = this.getNodeParameter('updateFields', i);
 						Object.assign(body, updateFields);
-						responseData = await slackApiRequest.call(this, 'POST', '/chat.update', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/chat.update`,
+							body,
+							qs,
+						);
 					}
 					//https://api.slack.com/methods/chat.delete
 					if (operation === 'delete') {
@@ -944,7 +1104,13 @@ export class SlackV2 implements INodeType {
 							ts: timestamp,
 						};
 						// Add all the other options to the request
-						responseData = await slackApiRequest.call(this, 'POST', '/chat.delete', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/chat.delete`,
+							body,
+							qs,
+						);
 					}
 					//https://api.slack.com/methods/chat.getPermalink
 					if (operation === 'getPermalink') {
@@ -959,38 +1125,102 @@ export class SlackV2 implements INodeType {
 							channel,
 							message_ts: timestamp,
 						};
-						responseData = await slackApiRequest.call(this, 'GET', '/chat.getPermalink', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/chat.getPermalink`,
+							{},
+							qs,
+						);
 					}
 					//https://api.slack.com/methods/search.messages
+					//https://docs.slack.dev/reference/methods/assistant.search.context
 					if (operation === 'search') {
 						let query = this.getNodeParameter('query', i) as string;
 						const sort = this.getNodeParameter('sort', i) as string;
-						const returnAll = this.getNodeParameter('returnAll', i);
+						const returnAll = this.getNodeParameter('returnAll', i, false);
 						const options = this.getNodeParameter('options', i);
-						if (options.searchChannel) {
-							const channel = options.searchChannel as IDataObject[];
-							for (const channelItem of channel) {
-								query += ` in:${channelItem}`;
+						const sortBy = sort === 'relevance' ? 'score' : 'timestamp';
+						const sortDir = sort === 'asc' ? 'asc' : 'desc';
+
+						if (nodeVersion >= 2.7) {
+							// assistant.search.context has no argument for this - its `modifiers` only
+							// applies to term clauses - so the filter goes in the query text, which
+							// Slack parses channel filters out of
+							for (const channel of toMultiOptionsCsv(options.searchChannel)
+								.split(',')
+								.filter(Boolean)) {
+								query += ` in:${channel}`;
 							}
-						}
-						qs = {
-							query,
-							sort: sort === 'relevance' ? 'score' : 'timestamp',
-							sort_dir: sort === 'asc' ? 'asc' : 'desc',
-						};
-						if (returnAll) {
-							responseData = await slackApiRequestAllItems.call(
+							// channel_types/content_types are array args: the JSON body needs real
+							// arrays, not the comma-separated form used for query-string params
+							const body: IDataObject = {
+								query,
+								content_types: ['messages'],
+								sort: sortBy,
+								sort_dir: sortDir,
+							};
+							const channelTypes = toMultiOptionsCsv(options.channelTypes);
+							if (channelTypes) {
+								body.channel_types = channelTypes.split(',');
+							}
+							const timezone = this.getTimezone();
+							if (options.after) {
+								body.after = moment.tz(options.after as string, timezone).unix();
+							}
+							if (options.before) {
+								body.before = moment.tz(options.before as string, timezone).unix();
+							}
+							if (options.keywordSearchOnly) {
+								body.disable_semantic_search = true;
+							}
+							if (options.includeArchivedChannels) {
+								body.include_archived_channels = true;
+							}
+							if (options.includeBots) {
+								body.include_bots = true;
+							}
+							if (options.includeMessageBlocks) {
+								body.include_message_blocks = true;
+							}
+
+							responseData = await searchContextItems.call(
 								this,
-								'messages',
-								'GET',
-								'/search.messages',
-								{},
-								qs,
+								body,
+								this.getNodeParameter('limit', i) as number,
 							);
 						} else {
-							qs.count = this.getNodeParameter('limit', i);
-							responseData = await slackApiRequest.call(this, 'POST', '/search.messages', {}, qs);
-							responseData = responseData.messages.matches;
+							if (options.searchChannel) {
+								const channel = options.searchChannel as IDataObject[];
+								for (const channelItem of channel) {
+									query += ` in:${channelItem}`;
+								}
+							}
+							qs = {
+								query,
+								sort: sortBy,
+								sort_dir: sortDir,
+							};
+							if (returnAll) {
+								responseData = await slackApiRequestAllItems.call(
+									this,
+									'messages',
+									'GET',
+									requestPath`/search.messages`,
+									{},
+									qs,
+								);
+							} else {
+								qs.count = this.getNodeParameter('limit', i);
+								responseData = await slackApiRequest.call(
+									this,
+									'POST',
+									requestPath`/search.messages`,
+									{},
+									qs,
+								);
+								responseData = responseData.messages.matches;
+							}
 						}
 					}
 				}
@@ -1010,7 +1240,13 @@ export class SlackV2 implements INodeType {
 							name,
 							timestamp,
 						};
-						responseData = await slackApiRequest.call(this, 'POST', '/reactions.add', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/reactions.add`,
+							body,
+							qs,
+						);
 					}
 					//https://api.slack.com/methods/reactions.remove
 					if (operation === 'remove') {
@@ -1020,13 +1256,25 @@ export class SlackV2 implements INodeType {
 							name,
 							timestamp,
 						};
-						responseData = await slackApiRequest.call(this, 'POST', '/reactions.remove', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/reactions.remove`,
+							body,
+							qs,
+						);
 					}
 					//https://api.slack.com/methods/reactions.get
 					if (operation === 'get') {
 						qs.channel = channel;
 						qs.timestamp = timestamp;
-						responseData = await slackApiRequest.call(this, 'GET', '/reactions.get', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/reactions.get`,
+							{},
+							qs,
+						);
 					}
 				}
 				if (resource === 'star') {
@@ -1054,7 +1302,13 @@ export class SlackV2 implements INodeType {
 						if (options.fileComment) {
 							body.file_comment = options.fileComment as string;
 						}
-						responseData = await slackApiRequest.call(this, 'POST', '/stars.add', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/stars.add`,
+							body,
+							qs,
+						);
 					}
 					//https://api.slack.com/methods/stars.remove
 					if (operation === 'delete') {
@@ -1072,7 +1326,13 @@ export class SlackV2 implements INodeType {
 						if (options.timestamp) {
 							body.timestamp = options.timestamp as string;
 						}
-						responseData = await slackApiRequest.call(this, 'POST', '/stars.remove', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/stars.remove`,
+							body,
+							qs,
+						);
 					}
 					//https://api.slack.com/methods/stars.list
 					if (operation === 'getAll') {
@@ -1082,13 +1342,19 @@ export class SlackV2 implements INodeType {
 								this,
 								'items',
 								'GET',
-								'/stars.list',
+								requestPath`/stars.list`,
 								{},
 								qs,
 							);
 						} else {
 							qs.limit = this.getNodeParameter('limit', i);
-							responseData = await slackApiRequest.call(this, 'GET', '/stars.list', {}, qs);
+							responseData = await slackApiRequest.call(
+								this,
+								'GET',
+								requestPath`/stars.list`,
+								{},
+								qs,
+							);
 							responseData = responseData.items;
 						}
 					}
@@ -1145,7 +1411,7 @@ export class SlackV2 implements INodeType {
 								responseData = await slackApiRequest.call(
 									this,
 									'POST',
-									'/files.upload',
+									requestPath`/files.upload`,
 									{},
 									qs,
 									{ 'Content-Type': 'multipart/form-data' },
@@ -1164,7 +1430,7 @@ export class SlackV2 implements INodeType {
 								const uploadUrl = await slackApiRequest.call(
 									this,
 									'GET',
-									'/files.getUploadURLExternal',
+									requestPath`/files.getUploadURLExternal`,
 									{},
 									{
 										filename: options.fileName ? options.fileName : binaryData.fileName,
@@ -1189,7 +1455,7 @@ export class SlackV2 implements INodeType {
 								responseData = await slackApiRequest.call(
 									this,
 									'POST',
-									'/files.completeUploadExternal',
+									requestPath`/files.completeUploadExternal`,
 									body,
 								);
 								responseData = responseData.files;
@@ -1200,7 +1466,7 @@ export class SlackV2 implements INodeType {
 							responseData = await slackApiRequest.call(
 								this,
 								'POST',
-								'/files.upload',
+								requestPath`/files.upload`,
 								body,
 								qs,
 								{ 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1236,13 +1502,19 @@ export class SlackV2 implements INodeType {
 								this,
 								'files',
 								'GET',
-								'/files.list',
+								requestPath`/files.list`,
 								{},
 								qs,
 							);
 						} else {
 							qs.count = this.getNodeParameter('limit', i);
-							responseData = await slackApiRequest.call(this, 'GET', '/files.list', {}, qs);
+							responseData = await slackApiRequest.call(
+								this,
+								'GET',
+								requestPath`/files.list`,
+								{},
+								qs,
+							);
 							responseData = responseData.files;
 						}
 					}
@@ -1250,7 +1522,13 @@ export class SlackV2 implements INodeType {
 					if (operation === 'get') {
 						const fileId = this.getNodeParameter('fileId', i) as string;
 						qs.file = fileId;
-						responseData = await slackApiRequest.call(this, 'GET', '/files.info', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/files.info`,
+							{},
+							qs,
+						);
 						responseData = responseData.file;
 					}
 				}
@@ -1258,7 +1536,25 @@ export class SlackV2 implements INodeType {
 					//https://api.slack.com/methods/users.info
 					if (operation === 'info') {
 						qs.user = this.getNodeParameter('user', i, undefined, { extractValue: true }) as string;
-						responseData = await slackApiRequest.call(this, 'GET', '/users.info', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/users.info`,
+							{},
+							qs,
+						);
+						responseData = responseData.user;
+					}
+					//https://api.slack.com/methods/users.lookupByEmail
+					if (operation === 'lookupByEmail') {
+						qs.email = this.getNodeParameter('email', i) as string;
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/users.lookupByEmail`,
+							{},
+							qs,
+						);
 						responseData = responseData.user;
 					}
 					//https://api.slack.com/methods/users.list
@@ -1269,24 +1565,42 @@ export class SlackV2 implements INodeType {
 								this,
 								'members',
 								'GET',
-								'/users.list',
+								requestPath`/users.list`,
 								{},
 								qs,
 							);
 						} else {
 							qs.limit = this.getNodeParameter('limit', i);
-							responseData = await slackApiRequest.call(this, 'GET', '/users.list', {}, qs);
+							responseData = await slackApiRequest.call(
+								this,
+								'GET',
+								requestPath`/users.list`,
+								{},
+								qs,
+							);
 							responseData = responseData.members;
 						}
 					}
 					//https://api.slack.com/methods/users.getPresence
 					if (operation === 'getPresence') {
 						qs.user = this.getNodeParameter('user', i, undefined, { extractValue: true }) as string;
-						responseData = await slackApiRequest.call(this, 'GET', '/users.getPresence', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/users.getPresence`,
+							{},
+							qs,
+						);
 					}
 					if (operation === 'getProfile') {
 						qs.user = this.getNodeParameter('user', i, undefined, { extractValue: true }) as string;
-						responseData = await slackApiRequest.call(this, 'GET', '/users.profile.get', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/users.profile.get`,
+							{},
+							qs,
+						);
 						responseData = responseData.profile;
 					}
 					if (operation === 'updateProfile') {
@@ -1337,7 +1651,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/users.profile.set',
+							requestPath`/users.profile.set`,
 							requestBody,
 							qs,
 						);
@@ -1359,7 +1673,13 @@ export class SlackV2 implements INodeType {
 
 						Object.assign(body, options);
 
-						responseData = await slackApiRequest.call(this, 'POST', '/usergroups.create', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/usergroups.create`,
+							body,
+							qs,
+						);
 
 						responseData = responseData.usergroup;
 					}
@@ -1375,7 +1695,13 @@ export class SlackV2 implements INodeType {
 
 						Object.assign(body, options);
 
-						responseData = await slackApiRequest.call(this, 'POST', '/usergroups.enable', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/usergroups.enable`,
+							body,
+							qs,
+						);
 
 						responseData = responseData.usergroup;
 					}
@@ -1394,7 +1720,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/usergroups.disable',
+							requestPath`/usergroups.disable`,
 							body,
 							qs,
 						);
@@ -1410,7 +1736,13 @@ export class SlackV2 implements INodeType {
 
 						Object.assign(qs, options);
 
-						responseData = await slackApiRequest.call(this, 'GET', '/usergroups.list', {}, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'GET',
+							requestPath`/usergroups.list`,
+							{},
+							qs,
+						);
 
 						responseData = responseData.usergroups;
 
@@ -1433,7 +1765,13 @@ export class SlackV2 implements INodeType {
 
 						Object.assign(body, updateFields);
 
-						responseData = await slackApiRequest.call(this, 'POST', '/usergroups.update', body, qs);
+						responseData = await slackApiRequest.call(
+							this,
+							'POST',
+							requestPath`/usergroups.update`,
+							body,
+							qs,
+						);
 
 						responseData = responseData.usergroup;
 					}
@@ -1449,7 +1787,7 @@ export class SlackV2 implements INodeType {
 						const currentGroupData = await slackApiRequest.call(
 							this,
 							'GET',
-							'/usergroups.list',
+							requestPath`/usergroups.list`,
 							{},
 							{ ...qs, include_users: true, usergroup: userGroupId },
 						);
@@ -1475,7 +1813,7 @@ export class SlackV2 implements INodeType {
 						responseData = await slackApiRequest.call(
 							this,
 							'POST',
-							'/usergroups.users.update',
+							requestPath`/usergroups.users.update`,
 							body,
 							qs,
 						);
@@ -1494,7 +1832,7 @@ export class SlackV2 implements INodeType {
 						const groupData = await slackApiRequest.call(
 							this,
 							'GET',
-							'/usergroups.list',
+							requestPath`/usergroups.list`,
 							{},
 							{ ...qs, include_users: true, usergroup: userGroupId },
 						);
@@ -1520,7 +1858,7 @@ export class SlackV2 implements INodeType {
 								const { user } = await slackApiRequest.call(
 									this,
 									'GET',
-									'/users.info',
+									requestPath`/users.info`,
 									{},
 									{ user: userId },
 								);

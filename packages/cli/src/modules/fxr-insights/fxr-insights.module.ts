@@ -11,11 +11,11 @@ import { Container } from '@n8n/di';
 @BackendModule({ name: 'fxr-insights', instanceTypes: ['main', 'webhook'] })
 export class FxrInsightsModule implements ModuleInterface {
 	async init() {
-		await import('./fxr-insights.controller');
+		await import('./fxr-insights.controller.js');
 	}
 
 	async settings() {
-		const { FxrInsightsSettings } = await import('./fxr-insights.settings');
+		const { FxrInsightsSettings } = await import('./fxr-insights.settings.js');
 		return Container.get(FxrInsightsSettings).settings();
 	}
 }

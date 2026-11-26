@@ -18,6 +18,7 @@ import {
 	displayParameter,
 	isResourceLocatorValue,
 	deepCopy,
+	NodeHelpers,
 } from 'n8n-workflow';
 import type { INodeUi, IUpdateInformation } from '@/Interface';
 import { CUSTOM_API_CALL_KEY, SWITCH_NODE_TYPE } from '@/app/constants';
@@ -32,6 +33,12 @@ import { setParameterValue } from '@/app/utils/parameterUtils';
 import type { Ref } from 'vue';
 import { omitKey } from '@/app/utils/objectUtils';
 import type { BaseTextKey } from '@n8n/i18n';
+import { BUILT_IN_DISPLAY_MODES, runDataDisplayModeRegistry } from '@n8n/frontend-module-sdk';
+import type {
+	BuiltInDisplayMode,
+	DisplayMode,
+	RunDataDisplayModePane,
+} from '@n8n/frontend-module-sdk';
 
 export interface ParameterOptionsOverrides {
 	hideExpressionSelector?: boolean;
@@ -116,20 +123,13 @@ export function setValue(
 				}
 			}
 		} else {
-			// Value should be set
-			if (typeof value === 'object') {
-				set(
-					get(nodeValues.value, nameParts.join('.')) as Record<string, unknown>,
-					lastNamePart as string,
-					deepCopy(value),
-				);
-			} else {
-				set(
-					get(nodeValues.value, nameParts.join('.')) as Record<string, unknown>,
-					lastNamePart as string,
-					value,
-				);
-			}
+			// Value should be set. Write from the root via the full path so the setter
+			// builds own-property intermediates rather than reading an inherited member
+			// of an object along the path.
+			const fullPath = isArray
+				? `${nameParts.join('.')}[${lastNamePart}]`
+				: `${nameParts.join('.')}.${lastNamePart}`;
+			set(nodeValues.value, fullPath, typeof value === 'object' ? deepCopy(value) : value);
 		}
 	}
 
@@ -340,7 +340,7 @@ export function getParameterTypeOption<T extends keyof NonNullable<INodeProperti
 }
 
 export function isResourceLocatorParameterType(type: NodePropertyTypes) {
-	return type === 'resourceLocator' || type === 'workflowSelector';
+	return type === 'resourceLocator' || type === 'workflowSelector' || type === 'agentSelector';
 }
 
 export function isValidParameterOption(
@@ -433,12 +433,19 @@ export function parseFromExpression(
 			: null;
 	}
 
-	if (typeof evaluatedExpressionValue !== 'undefined') {
-		return evaluatedExpressionValue;
+	// `json` fields (e.g. HTTP Request "JSON Body") store raw text. Switching back to
+	// fixed mode must drop the internal "=" expression marker so the value parses as JSON.
+	if (parameterType === 'json' && typeof currentParameterValue === 'string') {
+		return currentParameterValue ? currentParameterValue.replace(/^=+/, '') : null;
 	}
 
+	// Fall back to default when the expression can't resolve (e.g. $fromAI() -> null); `??` keeps a real `false`/`0`.
 	if (['number', 'boolean'].includes(parameterType)) {
-		return defaultValue;
+		return evaluatedExpressionValue ?? defaultValue;
+	}
+
+	if (typeof evaluatedExpressionValue !== 'undefined') {
+		return evaluatedExpressionValue;
 	}
 
 	return null;
@@ -582,21 +589,21 @@ export function createCommonNodeSettings(
 
 	if (canUseOtelCustomSpanAttributes) {
 		ret.push({
-			displayName: t('nodeSettings.customTelemetryTags.displayName'),
+			displayName: t('nodeSettings.customSpanAttributes.displayName'),
 			name: 'customTelemetryTags',
 			type: 'fixedCollection',
 			typeOptions: { multipleValues: true, sortable: true },
-			placeholder: t('nodeSettings.customTelemetryTags.placeholder'),
+			placeholder: t('nodeSettings.customSpanAttributes.placeholder'),
 			default: {},
-			description: t('nodeSettings.customTelemetryTags.description'),
+			description: t('nodeSettings.customSpanAttributes.description'),
 			isNodeSetting: true,
 			options: [
 				{
 					name: 'tag',
-					displayName: t('nodeSettings.customTelemetryTags.tag.displayName'),
+					displayName: t('nodeSettings.customSpanAttributes.tag.displayName'),
 					values: [
 						{
-							displayName: t('nodeSettings.customTelemetryTags.tag.key.displayName'),
+							displayName: t('nodeSettings.customSpanAttributes.tag.key.displayName'),
 							name: 'key',
 							type: 'string',
 							default: '',
@@ -604,7 +611,7 @@ export function createCommonNodeSettings(
 							isNodeSetting: true,
 						},
 						{
-							displayName: t('nodeSettings.customTelemetryTags.tag.value.displayName'),
+							displayName: t('nodeSettings.customSpanAttributes.tag.value.displayName'),
 							name: 'value',
 							type: 'string',
 							default: '',
@@ -758,4 +765,125 @@ export function collectParametersByTab(parameters: INodeProperties[], isEmbedded
 	}
 
 	return ret;
+}
+
+const SCALAR_PARAMETER_TYPES = new Set<INodeProperties['type']>([
+	'string',
+	'number',
+	'boolean',
+	'options',
+	'dateTime',
+	'color',
+]);
+
+const PLAIN_PARAMETER_TYPES = new Set<INodeProperties['type']>([
+	...SCALAR_PARAMETER_TYPES,
+	'multiOptions',
+]);
+
+/**
+ * Declarations that share a name also share one stored value, which carries over when
+ * another of them becomes visible. A value only fits declarations of the same shape.
+ * Single scalar values share one shape, so a string still carries into a number field.
+ */
+function getParameterValueShape(parameter: INodeProperties): string {
+	const isList = parameter.typeOptions?.multipleValues === true;
+	if (SCALAR_PARAMETER_TYPES.has(parameter.type) && !isList) return 'scalar';
+	return isList ? `${parameter.type}[]` : parameter.type;
+}
+
+export function isObjectInPlainParameter(parameter: INodeProperties, value: unknown): boolean {
+	return (
+		PLAIN_PARAMETER_TYPES.has(parameter.type) &&
+		typeof value === 'object' &&
+		value !== null &&
+		!Array.isArray(value)
+	);
+}
+
+function getMixedShapeNames(properties: INodeProperties[]): Map<string, INodeProperties[]> {
+	const byName = new Map<string, INodeProperties[]>();
+	for (const property of properties) {
+		byName.set(property.name, [...(byName.get(property.name) ?? []), property]);
+	}
+	return new Map(
+		[...byName].filter(
+			([, declarations]) => new Set(declarations.map(getParameterValueShape)).size > 1,
+		),
+	);
+}
+
+// The same resolution getNodeParameters does internally for its display checks
+function getDisplayValues(nodeType: INodeTypeDescription, values: INodeParameters, node: INode) {
+	return (
+		NodeHelpers.getNodeParameters(nodeType.properties, values, true, true, node, nodeType, {
+			onlySimpleTypes: true,
+			dataIsResolved: true,
+		}) ?? {}
+	);
+}
+
+function getVisibleShape(
+	declarations: INodeProperties[],
+	displayValues: INodeParameters,
+	node: INode,
+	nodeType: INodeTypeDescription,
+): string | undefined {
+	const visible = declarations.find((declaration) =>
+		NodeHelpers.displayParameter(displayValues, declaration, node, nodeType),
+	);
+	return visible && getParameterValueShape(visible);
+}
+
+/**
+ * Drops the value of a same-named parameter when a change shows a declaration of another
+ * shape under its name, so the new declaration gets its default. Names the change sets
+ * directly are kept.
+ */
+export function resetValuesOfChangedShape(
+	nodeType: INodeTypeDescription,
+	node: INode,
+	parameters: INodeParameters,
+	changedPaths: string[],
+): INodeParameters {
+	const mixed = getMixedShapeNames(nodeType.properties);
+	if (mixed.size === 0) return parameters;
+
+	const changedNames = new Set(changedPaths.map((path) => path.split(/[.[]/)[0]));
+	const before = getDisplayValues(nodeType, node.parameters, node);
+	const after = getDisplayValues(nodeType, parameters, node);
+	const reset = [...mixed].filter(([name, declarations]) => {
+		if (changedNames.has(name)) return false;
+		const from = getVisibleShape(declarations, before, node, nodeType);
+		const to = getVisibleShape(declarations, after, node, nodeType);
+		return from !== undefined && to !== undefined && from !== to;
+	});
+
+	return Object.fromEntries(
+		Object.entries(parameters).filter(([name]) => !reset.some(([resetName]) => resetName === name)),
+	);
+}
+
+export const PANE_DEFAULT_DISPLAY_MODE = {
+	input: 'schema',
+	output: 'table',
+} as const satisfies Record<RunDataDisplayModePane, BuiltInDisplayMode>;
+
+export function isBuiltInDisplayMode(mode: DisplayMode): mode is BuiltInDisplayMode {
+	return BUILT_IN_DISPLAY_MODES.some((builtIn) => builtIn === mode);
+}
+
+/**
+ * Returns the stored mode if it is built in or registered, otherwise the pane
+ * default. A stored id can be unknown after a rollback, an uninstall or a
+ * rename. Storage keeps the id, so it applies again if the module returns
+ * before another mode is selected.
+ *
+ * It does not check `canRender`: the caller must also fall back when
+ * `getAvailableDisplayMode` finds nothing for the current data.
+ */
+export function resolveDisplayMode(stored: DisplayMode, pane: RunDataDisplayModePane): DisplayMode {
+	return isBuiltInDisplayMode(stored) || runDataDisplayModeRegistry.has(stored)
+		? stored
+		: PANE_DEFAULT_DISPLAY_MODE[pane];
 }

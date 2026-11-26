@@ -4,7 +4,7 @@ import { SettingsRepository } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { Cipher } from 'n8n-core';
 
-import { UrlService } from '@/services/url.service';
+import { UrlService } from '@n8n/backend-services';
 
 import { FxrSsoConfig } from './fxr-sso.config';
 
@@ -97,7 +97,7 @@ export class FxrSsoSettingsService {
 		}
 		const stored = await this.loadStored();
 		const clientSecret = stored.clientSecretEncrypted
-			? this.cipher.decrypt(stored.clientSecretEncrypted)
+			? await this.cipher.decryptV2(stored.clientSecretEncrypted)
 			: '';
 		return {
 			enabled: stored.enabled && Boolean(stored.issuer && stored.clientId && clientSecret),
@@ -142,7 +142,7 @@ export class FxrSsoSettingsService {
 			issuer: dto.issuer,
 			clientId: dto.clientId,
 			clientSecretEncrypted: dto.clientSecret
-				? this.cipher.encrypt(dto.clientSecret)
+				? await this.cipher.encryptV2(dto.clientSecret)
 				: current.clientSecretEncrypted,
 			allowedDomains: dto.allowedDomains,
 			autoProvision: dto.autoProvision,

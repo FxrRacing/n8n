@@ -12,6 +12,12 @@ import type { IExecutionContext } from 'n8n-workflow';
 import { WorkflowExecutionService } from '@/workflows/workflow-execution.service';
 
 import { createOwner } from './shared/db/users';
+import {
+	validateRootContext,
+	validateChildContextInheritance,
+	validateContextInheritanceChain,
+	validateBasicContextStructure,
+} from './shared/execution-context-helpers';
 import * as utils from './shared/utils';
 import { loadNodesFromDist } from './shared/utils/node-types-data';
 import {
@@ -20,12 +26,6 @@ import {
 	createMiddleWorkflowFixture,
 	createSimpleWorkflowFixture,
 } from './shared/workflow-fixtures';
-import {
-	validateRootContext,
-	validateChildContextInheritance,
-	validateContextInheritanceChain,
-	validateBasicContextStructure,
-} from './shared/execution-context-helpers';
 
 // Fixtures are now imported from './shared/workflow-fixtures'
 
@@ -128,13 +128,13 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// ============================================================
 			// EXECUTE: Run Parent Workflow
 			// ============================================================
-			const result = await workflowExecutionService.executeManually(
-				parentWorkflow,
-				{
+			const result = await workflowExecutionService.executeManually({
+				workflowData: parentWorkflow,
+				payload: {
 					triggerToStartFrom: { name: 'Trigger' },
 				},
-				owner,
-			);
+				user: owner,
+			});
 
 			hasExecutionId(result);
 			expect(result).toBeDefined();
@@ -217,13 +217,13 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// ============================================================
 			// EXECUTE: Run Grandparent Workflow
 			// ============================================================
-			const result = await workflowExecutionService.executeManually(
-				grandparentWorkflow,
-				{
+			const result = await workflowExecutionService.executeManually({
+				workflowData: grandparentWorkflow,
+				payload: {
 					triggerToStartFrom: { name: 'Trigger' },
 				},
-				owner,
-			);
+				user: owner,
+			});
 
 			hasExecutionId(result);
 			expect(result).toBeDefined();
@@ -309,13 +309,13 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// ============================================================
 			// EXECUTE: Run Both Workflows Independently
 			// ============================================================
-			const result1 = await workflowExecutionService.executeManually(
-				workflow1,
-				{
+			const result1 = await workflowExecutionService.executeManually({
+				workflowData: workflow1,
+				payload: {
 					triggerToStartFrom: { name: 'Trigger' },
 				},
-				owner,
-			);
+				user: owner,
+			});
 			hasExecutionId(result1);
 
 			expect(result1).toBeDefined();
@@ -324,13 +324,13 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// Wait for first execution to complete
 			await waitForExecution(result1.executionId);
 
-			const result2 = await workflowExecutionService.executeManually(
-				workflow2,
-				{
+			const result2 = await workflowExecutionService.executeManually({
+				workflowData: workflow2,
+				payload: {
 					triggerToStartFrom: { name: 'Trigger' },
 				},
-				owner,
-			);
+				user: owner,
+			});
 
 			hasExecutionId(result2);
 			expect(result2).toBeDefined();

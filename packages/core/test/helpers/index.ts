@@ -1,7 +1,7 @@
+import type { IDeferredPromise } from '@n8n/utils/promise/deferred-promise';
 import { readdirSync, readFileSync } from 'fs';
 import type {
 	IDataObject,
-	IDeferredPromise,
 	INodeType,
 	INodeTypes,
 	IRun,
@@ -12,7 +12,8 @@ import type {
 	WorkflowTestData,
 	INodeTypeData,
 } from 'n8n-workflow';
-import { ApplicationError, NodeHelpers } from 'n8n-workflow';
+import { NodeHelpers } from 'n8n-workflow';
+import { UnexpectedError } from '@n8n/errors';
 import path from 'path';
 import { mock } from 'vitest-mock-extended';
 
@@ -139,7 +140,7 @@ export const workflowToTests = (dirname: string, testFolder = 'workflows') => {
 		const description = filePath.replace('.json', '');
 		const workflowData = readJsonFileSync<IWorkflowBase>(filePath);
 		if (workflowData.pinData === undefined) {
-			throw new ApplicationError('Workflow data does not contain pinData');
+			throw new UnexpectedError('Workflow data does not contain pinData');
 		}
 
 		const nodeData = preparePinData(workflowData.pinData);

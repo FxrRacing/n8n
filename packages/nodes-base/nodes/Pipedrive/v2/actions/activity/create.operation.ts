@@ -4,6 +4,7 @@ import type {
 	INodeExecutionData,
 	INodeProperties,
 } from 'n8n-workflow';
+import { requestPath } from 'n8n-workflow';
 
 import { updateDisplayOptions } from '../../../../../utils/utilities';
 import { pipedriveApiRequest, pipedriveGetCustomProperties } from '../../transport';
@@ -144,6 +145,14 @@ export async function execute(this: IExecuteFunctions): Promise<INodeExecutionDa
 				delete body.user_id;
 			}
 
+			// Pipedrive v2 made `person_id` read-only on the activities API; it must be set
+			// via the `participants` array instead. Remap the existing `person_id` parameter
+			// (kept for backward compatibility with saved workflows) and drop the read-only key.
+			if (body.person_id) {
+				body.participants = [{ person_id: body.person_id, primary: true }];
+			}
+			delete body.person_id;
+
 			if (body.due_date) {
 				body.due_date = toDateOnly(body.due_date as string);
 			}
@@ -152,7 +161,12 @@ export async function execute(this: IExecuteFunctions): Promise<INodeExecutionDa
 				encodeCustomFieldsV2(customProperties, body);
 			}
 
-			const responseData = await pipedriveApiRequest.call(this, 'POST', '/activities', body);
+			const responseData = await pipedriveApiRequest.call(
+				this,
+				'POST',
+				requestPath`/activities`,
+				body,
+			);
 
 			const executionData = this.helpers.constructExecutionMetaData(
 				this.helpers.returnJsonArray(responseData.data as IDataObject),

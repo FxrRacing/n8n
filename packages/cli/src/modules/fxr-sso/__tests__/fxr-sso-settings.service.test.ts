@@ -1,9 +1,9 @@
 import type { ModuleRegistry } from '@n8n/backend-common';
 import type { Settings, SettingsRepository } from '@n8n/db';
-import { mock } from 'jest-mock-extended';
+import { mock } from 'vitest-mock-extended';
 import type { Cipher } from 'n8n-core';
 
-import type { UrlService } from '@/services/url.service';
+import type { UrlService } from '@n8n/backend-services';
 
 import type { FxrSsoConfig } from '../fxr-sso.config';
 import { FXR_SSO_SETTINGS_KEY, FxrSsoSettingsService } from '../fxr-sso-settings.service';
@@ -18,10 +18,10 @@ describe('FxrSsoSettingsService', () => {
 	const stored = (value: object) => mock<Settings>({ value: JSON.stringify(value) });
 
 	beforeEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 		urlService.getInstanceBaseUrl.mockReturnValue('https://n8n.fxr.test');
-		cipher.encrypt.mockImplementation((v) => `enc(${String(v)})`);
-		cipher.decrypt.mockImplementation((v) => v.replace(/^enc\(|\)$/g, ''));
+		cipher.encryptV2.mockImplementation(async (v) => `enc(${String(v)})`);
+		cipher.decryptV2.mockImplementation(async (v) => v.replace(/^enc\(|\)$/g, ''));
 	});
 
 	it('prefers environment variables when FXR_SSO_ISSUER is set', async () => {

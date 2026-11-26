@@ -15,15 +15,11 @@ import type {
 import { runBinaryChecks } from '../binaryChecks/index';
 import type { BinaryCheckContext } from '../binaryChecks/types';
 import type { N8nClient, WorkflowResponse } from '../clients/n8n-client';
+import { buildWorkflow, type BuildResult } from '../harness/build-workflow';
+import { cleanupBuild } from '../harness/cleanup';
+import { JUDGE_MODEL } from '../../src/utils/eval-agents';
 import { createLogger, type EvalLogger } from '../harness/logger';
-import { buildWorkflow, cleanupBuild, type BuildResult } from '../harness/runner';
-
-/**
- * Client-side model used by binary checks (they call Anthropic directly with
- * ANTHROPIC_API_KEY). Independent of the server-side agent model, which the
- * server resolves from its own settings when the CLI doesn't pass `--model`.
- */
-const BINARY_CHECK_DEFAULT_MODEL = 'anthropic/claude-sonnet-4-20250514';
+import { agentTextOf } from '../utils/conversation-text';
 
 export interface RunWorkflowBuildEvalDeps {
 	client: N8nClient;
@@ -60,7 +56,7 @@ export async function runWorkflowBuildEval(
 		const feedback = await evaluateCapturedWorkflows({
 			workflows: build.workflowJsons,
 			prompt: testCase.prompt,
-			modelId: modelId ?? BINARY_CHECK_DEFAULT_MODEL,
+			modelId: modelId ?? JUDGE_MODEL,
 			agentTextResponse,
 			...(testCase.annotations ? { annotations: testCase.annotations } : {}),
 		});
@@ -130,7 +126,7 @@ function toCapturedWorkflow(workflow: WorkflowResponse): CapturedWorkflow {
 function extractAgentText(build: BuildResult): string {
 	return (
 		build.transcript
-			?.map((turn) => turn.agentText)
+			?.map((turn) => agentTextOf(turn))
 			.filter((text) => text.length > 0)
 			.join('\n\n') ?? ''
 	);

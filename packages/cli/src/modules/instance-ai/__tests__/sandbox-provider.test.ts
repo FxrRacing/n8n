@@ -1,4 +1,6 @@
-import { OperationalError } from 'n8n-workflow';
+import { instanceAiSandboxProviderSchema } from '@n8n/api-types';
+import { normalizeSandboxProvider as normalizeRuntimeSandboxProvider } from '@n8n/agents/sandbox';
+import { OperationalError } from '@n8n/errors';
 
 import {
 	N8N_SANDBOX_SERVICE_URL_REQUIRED_MESSAGE,
@@ -8,6 +10,12 @@ import {
 
 describe('sandbox-provider', () => {
 	describe('normalizeSandboxProvider', () => {
+		it('stays aligned with runtime sandbox providers', () => {
+			for (const provider of instanceAiSandboxProviderSchema.options) {
+				expect(normalizeRuntimeSandboxProvider(provider)).toBe(provider);
+			}
+		});
+
 		it('returns supported sandbox providers unchanged', () => {
 			expect(normalizeSandboxProvider('n8n-sandbox')).toBe('n8n-sandbox');
 			expect(normalizeSandboxProvider('daytona')).toBe('daytona');

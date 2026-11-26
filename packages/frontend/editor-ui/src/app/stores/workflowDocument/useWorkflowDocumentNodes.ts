@@ -10,7 +10,6 @@ import {
 import { createEventHook } from '@vueuse/core';
 import { structuralComputed } from '@n8n/composables/structuralComputed';
 import type {
-	INode,
 	INodeCredentials,
 	INodeCredentialsDetails,
 	INodeIssueData,
@@ -61,7 +60,6 @@ export interface WorkflowDocumentNodesDeps {
 	getNodeType: (typeName: string, version?: number) => INodeTypeDescription | null;
 	assignNodeId: (node: INodeUi) => string;
 	syncWorkflowObject: (nodes: INodeUi[]) => void;
-	unpinNodeData: (name: string) => void;
 	nodeMetadata: ReturnType<typeof useWorkflowDocumentNodeMetadata>;
 	workflowObject: Ref<Workflow>;
 }
@@ -169,7 +167,6 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 
 		deps.syncWorkflowObject(nodes.value);
 		deps.nodeMetadata.removeNodeMetadata(node.name);
-		deps.unpinNodeData(node.name);
 		void onNodesChange.trigger({
 			action: CHANGE_ACTION.DELETE,
 			payload: { name: node.name, id: node.id },
@@ -186,7 +183,6 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 		deps.syncWorkflowObject(nodes.value);
 		if (node) {
 			deps.nodeMetadata.removeNodeMetadata(node.name);
-			deps.unpinNodeData(node.name);
 		}
 		void onNodesChange.trigger({
 			action: CHANGE_ACTION.DELETE,
@@ -502,7 +498,14 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 		return updateNodeAtIndex(nodeIndex, nodeData);
 	}
 
-	function updateNodeProperties(updateInformation: INodeUpdatePropertiesInformation): void {
+	/**
+	 * `markDirty: false` is for writes that mirror already-saved server state:
+	 * the document changes, but there is nothing new to save.
+	 */
+	function updateNodeProperties(
+		updateInformation: INodeUpdatePropertiesInformation,
+		{ markDirty = true }: { markDirty?: boolean } = {},
+	): void {
 		const nodeIndex = nodes.value.findIndex((node) => node.name === updateInformation.name);
 
 		if (nodeIndex !== -1) {
@@ -512,7 +515,7 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 
 				const changed = updateNodeAtIndex(nodeIndex, { [key]: property });
 
-				if (changed) {
+				if (changed && markDirty) {
 					void onStateDirty.trigger();
 				}
 			}
@@ -571,31 +574,30 @@ export function useWorkflowDocumentNodes(deps: WorkflowDocumentNodesDeps) {
 		type: string;
 	}) {
 		nodes.value.forEach((node: INodeUi) => {
-			const nodeCredentials: INodeCredentials | undefined = (node as unknown as INode).credentials;
-			if (!nodeCredentials?.[data.type]) {
+			const nodeCredentialDetails: INodeCredentialsDetails | string | undefined =
+				node.credentials?.[data.type];
+			if (!nodeCredentialDetails) {
 				return;
 			}
 
-			const nodeCredentialDetails: INodeCredentialsDetails | string = nodeCredentials[data.type];
-
-			if (
-				typeof nodeCredentialDetails === 'string' &&
-				nodeCredentialDetails === data.invalid.name
-			) {
-				(node.credentials as INodeCredentials)[data.type] = data.credentials;
-				return;
-			}
-
-			if (nodeCredentialDetails.id === null) {
-				if (nodeCredentialDetails.name === data.invalid.name) {
-					(node.credentials as INodeCredentials)[data.type] = data.credentials;
+			if (typeof nodeCredentialDetails === 'string') {
+				if (nodeCredentialDetails !== data.invalid.name) {
+					return;
 				}
+			} else if (nodeCredentialDetails.id === null) {
+				if (nodeCredentialDetails.name !== data.invalid.name) {
+					return;
+				}
+			} else if (nodeCredentialDetails.id !== data.invalid.id) {
 				return;
 			}
 
-			if (nodeCredentialDetails.id === data.invalid.id) {
-				(node.credentials as INodeCredentials)[data.type] = data.credentials;
-			}
+			updateNodeProperties({
+				name: node.name,
+				properties: {
+					credentials: { ...node.credentials, [data.type]: data.credentials },
+				},
+			});
 		});
 	}
 

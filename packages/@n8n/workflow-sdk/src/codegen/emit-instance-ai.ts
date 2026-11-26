@@ -53,10 +53,19 @@ export const SDK_FUNCTIONS = [
 	'retriever',
 	'documentLoader',
 	'textSplitter',
+	'reranker',
 	'fromAi',
 	'splitInBatches',
 	'nextBatch',
 	'expr',
+] as const;
+
+/** Names a workflow source file may import: `SDK_FUNCTIONS` plus helpers used inside node configs. */
+export const SDK_IMPORTABLE_FUNCTIONS = [
+	...SDK_FUNCTIONS,
+	'nodeJson',
+	'runOnceForAllItems',
+	'runOnceForEachItem',
 ] as const;
 
 export interface EmitInstanceAiOptions {

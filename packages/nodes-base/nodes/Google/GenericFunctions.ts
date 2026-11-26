@@ -1,3 +1,4 @@
+import { formatPemBlock } from '@n8n/utils/format-pem-block';
 import * as jwt from 'jsonwebtoken';
 import { DateTime } from 'luxon';
 import moment from 'moment-timezone';
@@ -12,9 +13,7 @@ import {
 	NodeOperationError,
 } from 'n8n-workflow';
 
-import { formatPrivateKey } from '@utils/utilities';
-
-const googleServiceAccountScopes = {
+export const googleServiceAccountScopes = {
 	bigquery: ['https://www.googleapis.com/auth/bigquery'],
 	books: ['https://www.googleapis.com/auth/books'],
 	chat: ['https://www.googleapis.com/auth/chat.bot'],
@@ -28,14 +27,8 @@ const googleServiceAccountScopes = {
 		'https://www.googleapis.com/auth/drive.appdata',
 		'https://www.googleapis.com/auth/drive.photos.readonly',
 	],
-	gmail: [
-		'https://www.googleapis.com/auth/gmail.labels',
-		'https://www.googleapis.com/auth/gmail.addons.current.action.compose',
-		'https://www.googleapis.com/auth/gmail.addons.current.message.action',
-		'https://mail.google.com/',
-		'https://www.googleapis.com/auth/gmail.modify',
-		'https://www.googleapis.com/auth/gmail.compose',
-	],
+	// This scope covers all Gmail operations. Delegation requires authorization for each requested scope.
+	gmail: ['https://mail.google.com/'],
 	sheetV1: [
 		'https://www.googleapis.com/auth/drive',
 		'https://www.googleapis.com/auth/drive.file',
@@ -45,6 +38,12 @@ const googleServiceAccountScopes = {
 		'https://www.googleapis.com/auth/drive.file',
 		'https://www.googleapis.com/auth/spreadsheets',
 		'https://www.googleapis.com/auth/drive.metadata',
+	],
+	sheetV2Trigger: [
+		'https://www.googleapis.com/auth/spreadsheets',
+		'https://www.googleapis.com/auth/drive.file',
+		'https://www.googleapis.com/auth/drive.metadata',
+		'https://www.googleapis.com/auth/drive.readonly',
 	],
 	slides: [
 		'https://www.googleapis.com/auth/drive.file',
@@ -63,9 +62,9 @@ const googleServiceAccountScopes = {
 		'https://www.googleapis.com/auth/cloud-platform',
 	],
 	vertex: ['https://www.googleapis.com/auth/cloud-platform'],
-};
+} as const;
 
-type GoogleServiceAccount = keyof typeof googleServiceAccountScopes;
+export type GoogleServiceAccount = keyof typeof googleServiceAccountScopes;
 
 export async function getGoogleAccessToken(
 	this:
@@ -81,7 +80,7 @@ export async function getGoogleAccessToken(
 
 	const scopes = googleServiceAccountScopes[service];
 
-	const privateKey = formatPrivateKey(credentials.privateKey as string);
+	const privateKey = formatPemBlock(credentials.privateKey as string);
 	credentials.email = ((credentials.email as string) || '').trim();
 
 	const now = moment().unix();
@@ -99,7 +98,6 @@ export async function getGoogleAccessToken(
 		{
 			algorithm: 'RS256',
 			header: {
-				kid: privateKey,
 				typ: 'JWT',
 				alg: 'RS256',
 			},

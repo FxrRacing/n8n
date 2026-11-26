@@ -8,8 +8,8 @@ import { BackendModule } from '@n8n/decorators';
 @BackendModule({ name: 'fxr-projects', instanceTypes: ['main'] })
 export class FxrProjectsModule implements ModuleInterface {
 	async init() {
-		await import('./fxr-projects.controller');
-		await import('./fxr-roles.controller');
+		await import('./fxr-projects.controller.js');
+		await import('./fxr-roles.controller.js');
 	}
 
 	async settings() {

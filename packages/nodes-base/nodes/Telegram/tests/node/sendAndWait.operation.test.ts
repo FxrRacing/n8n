@@ -1,15 +1,18 @@
-import type { MockProxy } from 'jest-mock-extended';
-import { mock } from 'jest-mock-extended';
+import { buildHitlCallbackReference, parseHitlCallbackReference } from 'n8n-core';
+import type { MockProxy } from 'vitest-mock-extended';
+import { mock } from 'vitest-mock-extended';
 import { type INode, SEND_AND_WAIT_OPERATION, type IExecuteFunctions } from 'n8n-workflow';
 
 import * as genericFunctions from '../../GenericFunctions';
 import { Telegram } from '../../Telegram.node';
+import type { Mock } from 'vitest';
+import type * as _importType0 from '../../GenericFunctions';
 
-jest.mock('../../GenericFunctions', () => {
-	const originalModule = jest.requireActual('../../GenericFunctions');
+vi.mock('../../GenericFunctions', async () => {
+	const originalModule = await vi.importActual<typeof _importType0>('../../GenericFunctions');
 	return {
 		...originalModule,
-		apiRequest: jest.fn(),
+		apiRequest: vi.fn(),
 	};
 });
 
@@ -23,7 +26,7 @@ describe('Test Telegram, message => sendAndWait', () => {
 	});
 
 	afterEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 	});
 
 	it('should send message and put execution to wait', async () => {
@@ -35,6 +38,7 @@ describe('Test Telegram, message => sendAndWait', () => {
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce(false);
 		mockExecuteFunctions.getNode.mockReturnValue(mock<INode>());
 		mockExecuteFunctions.getInstanceId.mockReturnValue('instanceId');
+		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce(false); // chatApproval (prepareChatApproval)
 
 		//createSendAndWaitMessageBody
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('chatID');
@@ -84,6 +88,7 @@ describe('Test Telegram, message => sendAndWait', () => {
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce(false);
 		mockExecuteFunctions.getNode.mockReturnValue(mock<INode>());
 		mockExecuteFunctions.getInstanceId.mockReturnValue('instanceId');
+		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce(false); // chatApproval (prepareChatApproval)
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('chatID');
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('my message');
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('my subject');
@@ -95,7 +100,7 @@ describe('Test Telegram, message => sendAndWait', () => {
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('approval');
 		mockExecuteFunctions.continueOnFail.mockReturnValue(true);
 
-		(genericFunctions.apiRequest as jest.Mock).mockRejectedValueOnce(new Error('chat_not_found'));
+		(genericFunctions.apiRequest as Mock).mockRejectedValueOnce(new Error('chat_not_found'));
 
 		const result = await telegram.execute.call(mockExecuteFunctions);
 
@@ -111,6 +116,7 @@ describe('Test Telegram, message => sendAndWait', () => {
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce(false);
 		mockExecuteFunctions.getNode.mockReturnValue(mock<INode>());
 		mockExecuteFunctions.getInstanceId.mockReturnValue('instanceId');
+		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce(false); // chatApproval (prepareChatApproval)
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('chatID');
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('my message');
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('my subject');
@@ -122,9 +128,61 @@ describe('Test Telegram, message => sendAndWait', () => {
 		mockExecuteFunctions.getNodeParameter.mockReturnValueOnce('approval');
 		mockExecuteFunctions.continueOnFail.mockReturnValue(false);
 
-		(genericFunctions.apiRequest as jest.Mock).mockRejectedValueOnce(new Error('chat_not_found'));
+		(genericFunctions.apiRequest as Mock).mockRejectedValueOnce(new Error('chat_not_found'));
 
 		await expect(telegram.execute.call(mockExecuteFunctions)).rejects.toThrow('chat_not_found');
 		expect(mockExecuteFunctions.putExecutionToWait).not.toHaveBeenCalled();
+	});
+});
+
+describe('createSendAndWaitMessageBody - chat approval callback references', () => {
+	afterEach(() => {
+		vi.clearAllMocks();
+	});
+
+	it('mints an approve callback with decision "a" and a decline callback with decision "d"', () => {
+		const context = mock<IExecuteFunctions>();
+		context.getApprovalCallbackReference.mockImplementation((decision) =>
+			buildHitlCallbackReference('exec-42', decision === 'approve' ? 'a' : 'd', 'secret'),
+		);
+		context.getInstanceId.mockReturnValue('instanceId');
+		context.getSignedResumeUrl.mockImplementation(
+			(params) =>
+				`http://localhost/waiting-webhook/nodeID?approved=${params?.approved}&signature=abc`,
+		);
+		context.getNodeParameter.mockImplementation((name: string) => {
+			switch (name) {
+				case 'chatId':
+					return 'chatID';
+				case 'message':
+					return 'my message';
+				case 'subject':
+					return 'my subject';
+				case 'approvalOptions.values':
+					return {
+						approvalType: 'double',
+						approveLabel: 'Approve',
+						disapproveLabel: 'Decline',
+					};
+				case 'responseType':
+					return 'approval';
+				default:
+					return {};
+			}
+		});
+
+		const body = genericFunctions.createSendAndWaitMessageBody(context, true);
+
+		const buttons = body.reply_markup.inline_keyboard[0] as Array<{
+			text: string;
+			callback_data: string;
+		}>;
+		const decisionForLabel = (label: string) => {
+			const button = buttons.find((b) => b.text === label);
+			return button && parseHitlCallbackReference(button.callback_data)?.decision;
+		};
+
+		expect(decisionForLabel('Approve')).toBe('a');
+		expect(decisionForLabel('Decline')).toBe('d');
 	});
 });

@@ -1,11 +1,20 @@
 import type { ChatHubLLMProvider } from '@n8n/api-types';
 
 import type { TestRunRecord } from './evaluation.api';
-import { type IconName } from '@n8n/design-system/components/N8nIcon/icons';
-import type { IconColor } from '@n8n/design-system/types/icon';
+import { type IconColor, type IconName } from '@n8n/design-system';
 
 import type { BaseTextKey } from '@n8n/i18n';
 import type { MetricCategory } from './evaluation.utils';
+
+// Reserved data-table column holding a case's user-facing name. Excluded from
+// input/expected fields and ignored by runs — it exists only for the UI.
+export const TEST_CASE_NAME_COLUMN = 'caseName';
+
+// Name that keys the eval config + its data table. All writers and lookups MUST
+// use this helper: a mismatched truncation would make the exact-match config
+// lookup silently resolve the wrong config.
+export const getCanonicalEvaluationName = (workflowName?: string): string =>
+	`Evaluation: ${workflowName ?? 'workflow'}`.slice(0, 120);
 
 // Values must remain ChatHubLLMProvider members so JudgeSelection round-trips.
 export const LM_SUBNODE_TYPE_TO_CHATHUB_PROVIDER: Record<string, ChatHubLLMProvider> = {
@@ -35,6 +44,7 @@ export const AI_ROOT_NODE_TYPES: readonly string[] = [
 	'@n8n/n8n-nodes-langchain.alibabaCloud',
 	'@n8n/n8n-nodes-langchain.miniMax',
 	'@n8n/n8n-nodes-langchain.moonshot',
+	'@n8n/n8n-nodes-langchain.databricksAiAgent',
 ] as const;
 
 const AI_ROOT_NODE_TYPE_SET = new Set<string>(AI_ROOT_NODE_TYPES);
@@ -54,6 +64,11 @@ export type CannedMetricKey =
 export type CannedMetric = {
 	key: CannedMetricKey;
 	labelKey: BaseTextKey;
+	// The action-phrased label shown in the "Add metric" dropdown (e.g. "To be
+	// similar to"). Used everywhere the metric is named — the overview chips and
+	// the result badges — so selecting an option and seeing it listed match.
+	// Falls back to `labelKey` for metrics not offered in the dropdown.
+	optionLabelKey?: BaseTextKey;
 	descriptionKey: BaseTextKey;
 	category: MetricCategory;
 	icon: IconName;
@@ -61,7 +76,25 @@ export type CannedMetric = {
 	tileFg: string;
 };
 
+// The unified display label for a canned metric: the dropdown's option label
+// when present, else the noun label.
+export function cannedMetricLabelKey(metric: CannedMetric): BaseTextKey {
+	return metric.optionLabelKey ?? metric.labelKey;
+}
+
 export const LLM_JUDGE_METRIC_KEYS = new Set<CannedMetricKey>(['correctness', 'helpfulness']);
+
+// Checks step display groupings. Correctness is the primary, pre-selected check;
+// the rest are revealed behind "Explore more checks". `helpfulness` and
+// `stringSimilarity` are intentionally not offered as built-in cards (they remain
+// achievable via a Custom check) but stay in CANNED_METRICS so legacy configs
+// still decode and render.
+export const BUILTIN_PRIMARY_CHECK_KEY: CannedMetricKey = 'correctness';
+export const BUILTIN_MORE_CHECK_KEYS: readonly CannedMetricKey[] = ['categorization', 'toolsUsed'];
+
+// Metrics pre-selected for a fresh/blank wizard. Hydration overrides this with a
+// saved config's metrics when one exists.
+export const DEFAULT_SELECTED_METRIC_KEYS: readonly CannedMetricKey[] = ['correctness'];
 
 // Column names must match what the Set Metrics operation reads (expectedAnswer,
 // expectedTools). Multiple metrics may share a column — wizard dedupes by name.
@@ -73,17 +106,17 @@ export type ExpectedField = {
 export const CANNED_METRIC_EXPECTED_FIELDS: Partial<Record<CannedMetricKey, ExpectedField>> = {
 	correctness: {
 		name: 'expectedAnswer',
-		labelKey: 'evaluations.wizardSidepanel.step2.expectedAnswer',
+		labelKey: 'evaluations.tests.detail.expectedAnswer',
 	},
 	stringSimilarity: {
 		name: 'expectedAnswer',
-		labelKey: 'evaluations.wizardSidepanel.step2.expectedAnswer',
+		labelKey: 'evaluations.tests.detail.expectedAnswer',
 	},
 	categorization: {
 		name: 'expectedAnswer',
-		labelKey: 'evaluations.wizardSidepanel.step2.expectedAnswer',
+		labelKey: 'evaluations.tests.detail.expectedAnswer',
 	},
-	toolsUsed: { name: 'expectedTools', labelKey: 'evaluations.wizardSidepanel.step2.expectedTools' },
+	toolsUsed: { name: 'expectedTools', labelKey: 'evaluations.tests.detail.expectedTools' },
 };
 
 export function getExpectedFieldsForMetrics(
@@ -104,6 +137,7 @@ export const CANNED_METRICS: readonly CannedMetric[] = [
 	{
 		key: 'correctness',
 		labelKey: 'evaluations.wizardSidepanel.metric.correctness.label',
+		optionLabelKey: 'evaluations.tests.metric.correctness.option',
 		descriptionKey: 'evaluations.wizardSidepanel.metric.correctness.description',
 		category: 'aiBased',
 		icon: 'badge-check',
@@ -122,6 +156,7 @@ export const CANNED_METRICS: readonly CannedMetric[] = [
 	{
 		key: 'stringSimilarity',
 		labelKey: 'evaluations.wizardSidepanel.metric.stringSimilarity.label',
+		optionLabelKey: 'evaluations.tests.metric.stringSimilarity.option',
 		descriptionKey: 'evaluations.wizardSidepanel.metric.stringSimilarity.description',
 		category: 'stringSimilarity',
 		icon: 'case-upper',
@@ -140,6 +175,7 @@ export const CANNED_METRICS: readonly CannedMetric[] = [
 	{
 		key: 'toolsUsed',
 		labelKey: 'evaluations.wizardSidepanel.metric.toolsUsed.label',
+		optionLabelKey: 'evaluations.tests.metric.toolsUsed.option',
 		descriptionKey: 'evaluations.wizardSidepanel.metric.toolsUsed.description',
 		category: 'toolsUsed',
 		icon: 'wrench',
@@ -159,7 +195,7 @@ const TEST_CASE_EXECUTION_ERROR_CODE = {
 export type TestCaseExecutionErrorCodes =
 	(typeof TEST_CASE_EXECUTION_ERROR_CODE)[keyof typeof TEST_CASE_EXECUTION_ERROR_CODE];
 
-const TEST_RUN_ERROR_CODES = {
+export const TEST_RUN_ERROR_CODES = {
 	TEST_CASES_NOT_FOUND: 'TEST_CASES_NOT_FOUND',
 	INTERRUPTED: 'INTERRUPTED',
 	UNKNOWN_ERROR: 'UNKNOWN_ERROR',
@@ -172,6 +208,7 @@ const TEST_RUN_ERROR_CODES = {
 	SET_METRICS_NODE_NOT_CONFIGURED: 'SET_METRICS_NODE_NOT_CONFIGURED',
 	CANT_FETCH_TEST_CASES: 'CANT_FETCH_TEST_CASES',
 	PARTIAL_CASES_FAILED: 'PARTIAL_CASES_FAILED',
+	COMPILATION_FAILED: 'COMPILATION_FAILED',
 } as const;
 
 export type TestRunErrorCode = (typeof TEST_RUN_ERROR_CODES)[keyof typeof TEST_RUN_ERROR_CODES];
@@ -191,6 +228,7 @@ const testRunErrorDictionary: Partial<Record<TestRunErrorCode, BaseTextKey>> = {
 	EVALUATION_TRIGGER_NOT_CONFIGURED: 'evaluation.listRuns.error.evaluationTriggerNotConfigured',
 	EVALUATION_TRIGGER_DISABLED: 'evaluation.listRuns.error.evaluationTriggerDisabled',
 	EVALUATION_CONFIG_NOT_FOUND: 'evaluation.listRuns.error.evaluationConfigNotFound',
+	COMPILATION_FAILED: 'evaluation.listRuns.error.compilationFailed',
 	SET_OUTPUTS_NODE_NOT_CONFIGURED: 'evaluation.listRuns.error.setOutputsNodeNotConfigured',
 	SET_METRICS_NODE_NOT_FOUND: 'evaluation.listRuns.error.setMetricsNodeNotFound',
 	SET_METRICS_NODE_NOT_CONFIGURED: 'evaluation.listRuns.error.setMetricsNodeNotConfigured',
@@ -198,13 +236,29 @@ const testRunErrorDictionary: Partial<Record<TestRunErrorCode, BaseTextKey>> = {
 	PARTIAL_CASES_FAILED: 'evaluation.runDetail.error.partialCasesFailed',
 } as const;
 
-export const getErrorBaseKey = (errorCode?: string): string => {
+export const getErrorBaseKey = (errorCode?: string): BaseTextKey | '' => {
 	return (
 		testCaseErrorDictionary[errorCode as TestCaseExecutionErrorCodes] ??
 		testRunErrorDictionary[errorCode as TestRunErrorCode] ??
 		''
 	);
 };
+
+/**
+ * The compiler's failure reason (e.g. "workflow trigger has multiple downstream
+ * nodes; set startNodeName explicitly") is already a user-safe message — the
+ * compiler only ever throws a UserError there — so prefer it over the generic
+ * static hint when present, so the user learns *why* compilation failed rather
+ * than just that it did.
+ */
+export function resolveCompilationFailureReason(
+	errorCode: string | undefined,
+	errorDetails: Record<string, unknown> | undefined,
+): string | undefined {
+	if (errorCode !== TEST_RUN_ERROR_CODES.COMPILATION_FAILED) return undefined;
+	const reason = errorDetails?.reason;
+	return typeof reason === 'string' && reason ? reason : undefined;
+}
 
 export const statusDictionary: Record<
 	TestRunRecord['status'],

@@ -6,7 +6,7 @@ OIDC provider that supports discovery. Authorization code flow with PKCE, nonce 
 | Route                                    | Purpose                                                                                                                                                        |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /rest/fxr-sso/login?redirect=/path` | Starts the flow. Stores PKCE verifier, nonce and state in a short-lived signed cookie, redirects to the provider.                                              |
-| `GET /rest/fxr-sso/callback`             | Exchanges the code, validates the ID token, resolves the n8n user, issues n8n's normal auth cookie, redirects back. Errors redirect to `/signin?ssoError=...`. |
+| `GET /rest/fxr-sso/callback`             | Exchanges the code, validates the ID token, resolves the n8n user, issues n8n's normal auth cookie, redirects back. Errors redirect to `/signin?ssoError=login-failed` (n8n's own SSO failure code); the cause is in the server log. |
 
 User resolution, in order: identity already linked to the provider subject → existing user with the
 same email (identity gets linked) → auto-provision a new user with a personal project when

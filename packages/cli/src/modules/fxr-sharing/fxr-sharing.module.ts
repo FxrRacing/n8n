@@ -9,7 +9,7 @@ import { BackendModule } from '@n8n/decorators';
 @BackendModule({ name: 'fxr-sharing', instanceTypes: ['main'] })
 export class FxrSharingModule implements ModuleInterface {
 	async init() {
-		await import('./fxr-sharing.controller');
+		await import('./fxr-sharing.controller.js');
 	}
 
 	async settings() {

@@ -1,63 +1,169 @@
-import type { Project, User } from '@n8n/db';
-import { mock } from 'jest-mock-extended';
-
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-
-import { MustPreexistCredentialMissingModeHandler } from '../credential-missing-mode';
-import type { CredentialMissingModeHandler } from '../credential-missing-mode';
-import { CredentialMissingModeFactory } from '../credential-missing-mode-factory';
-import type { CredentialMissingModeContext } from '../credential.types';
+import { credentialBlockingFailures, credentialsToStub } from '../credential-missing-mode';
 import { createFailure } from '../credential.types';
 
-const context: CredentialMissingModeContext = {
-	requirements: undefined,
-	targetProject: mock<Project>(),
-	user: mock<User>(),
-};
+describe('credentialBlockingFailures', () => {
+	describe('must-preexist', () => {
+		it('treats no failures as nothing blocking', () => {
+			expect(
+				credentialBlockingFailures('must-preexist', {
+					successes: new Map([['a', 'b']]),
+					failures: [],
+				}),
+			).toEqual([]);
+		});
 
-describe('MustPreexistCredentialMissingModeHandler', () => {
-	const handler: CredentialMissingModeHandler = new MustPreexistCredentialMissingModeHandler();
+		it('treats every unresolved reference as blocking', () => {
+			const failure = createFailure(
+				{ id: 'cred-1', name: 'X', type: 'githubApi', usedBy: [{ kind: 'workflow', id: 'wf-1' }] },
+				'not_found',
+			);
 
-	it('returns the result when there are no failures', async () => {
-		const result = { successes: new Map([['a', 'b']]), failures: [] };
-		await expect(handler.handle(result, context)).resolves.toBe(result);
+			expect(
+				credentialBlockingFailures('must-preexist', { successes: new Map(), failures: [failure] }),
+			).toEqual([failure]);
+		});
 	});
 
-	it('throws when failures are present', async () => {
-		const requirement = {
-			id: 'cred-1',
-			name: 'X',
-			type: 'githubApi',
-			usedByWorkflows: ['wf-1'],
-		};
+	describe('create-stub', () => {
+		it('treats not_found as non-blocking', () => {
+			const failure = createFailure(
+				{ id: 'cred-1', name: 'X', type: 'githubApi', usedBy: [{ kind: 'workflow', id: 'wf-1' }] },
+				'not_found',
+			);
 
-		await expect(
-			handler.handle(
-				{
+			expect(
+				credentialBlockingFailures('create-stub', { successes: new Map(), failures: [failure] }),
+			).toEqual([]);
+		});
+
+		it('still blocks not_found when an explicit binding target is missing', () => {
+			const failure = {
+				...createFailure(
+					{
+						id: 'cred-1',
+						name: 'X',
+						type: 'githubApi',
+						usedBy: [{ kind: 'workflow', id: 'wf-1' }],
+					},
+					'not_found',
+				),
+				targetId: 'target-missing',
+			};
+
+			expect(
+				credentialBlockingFailures('create-stub', { successes: new Map(), failures: [failure] }),
+			).toEqual([failure]);
+		});
+
+		it('still blocks unknown_type and source_not_found failures', () => {
+			const unknownType = createFailure(
+				{ id: 'cred-1', name: 'X', type: 'bad', usedBy: [{ kind: 'workflow', id: 'wf-1' }] },
+				'unknown_type',
+			);
+			const sourceNotFound = createFailure(
+				{ id: 'cred-2', name: 'Y', type: 'githubApi', usedBy: [{ kind: 'workflow', id: 'wf-2' }] },
+				'source_not_found',
+			);
+
+			expect(
+				credentialBlockingFailures('create-stub', {
 					successes: new Map(),
-					failures: [createFailure(requirement, 'not_found')],
-				},
-				context,
-			),
-		).rejects.toThrow();
+					failures: [unknownType, sourceNotFound],
+				}),
+			).toEqual([unknownType, sourceNotFound]);
+		});
+	});
+
+	describe('create-with-values', () => {
+		it('rescues the same failures as create-stub', () => {
+			const rescuable = createFailure(
+				{ id: 'cred-1', name: 'X', type: 'githubApi', usedBy: [{ kind: 'workflow', id: 'wf-1' }] },
+				'not_found',
+			);
+			const blockedBinding = {
+				...createFailure(
+					{
+						id: 'cred-2',
+						name: 'Y',
+						type: 'githubApi',
+						usedBy: [{ kind: 'workflow', id: 'wf-2' }],
+					},
+					'not_found',
+				),
+				targetId: 'target-missing',
+			};
+
+			expect(
+				credentialBlockingFailures('create-with-values', {
+					successes: new Map(),
+					failures: [rescuable, blockedBinding],
+				}),
+			).toEqual([blockedBinding]);
+		});
+
+		it('still blocks unknown_type and source_not_found failures', () => {
+			const unknownType = createFailure(
+				{ id: 'cred-1', name: 'X', type: 'bad', usedBy: [{ kind: 'workflow', id: 'wf-1' }] },
+				'unknown_type',
+			);
+			const sourceNotFound = createFailure(
+				{ id: 'cred-2', name: 'Y', type: 'githubApi', usedBy: [{ kind: 'workflow', id: 'wf-2' }] },
+				'source_not_found',
+			);
+
+			expect(
+				credentialBlockingFailures('create-with-values', {
+					successes: new Map(),
+					failures: [unknownType, sourceNotFound],
+				}),
+			).toEqual([unknownType, sourceNotFound]);
+		});
 	});
 });
 
-describe('CredentialMissingModeFactory', () => {
-	const factory = new CredentialMissingModeFactory();
-
-	it('returns MustPreexistCredentialMissingModeHandler for must-preexist', () => {
-		expect(factory.getHandler('must-preexist')).toBeInstanceOf(
-			MustPreexistCredentialMissingModeHandler,
+describe('credentialsToStub', () => {
+	const notFound = (id: string, workflowIds = ['wf-1']) =>
+		createFailure(
+			{
+				id,
+				name: id,
+				type: 'githubApi',
+				usedBy: workflowIds.map((workflowId) => ({ kind: 'workflow', id: workflowId })),
+			},
+			'not_found',
 		);
+
+	it('stubs nothing under must-preexist', () => {
+		expect(
+			credentialsToStub('must-preexist', { successes: new Map(), failures: [notFound('cred-1')] }),
+		).toEqual([]);
 	});
 
-	it('rejects unsupported credential missing modes', () => {
-		expect(() => factory.getHandler('invalid' as 'must-preexist')).toThrow(BadRequestError);
+	it('stubs only not_found failures without an explicit binding target', () => {
+		const stubbable = notFound('cred-1');
+		const bound = { ...notFound('cred-2'), targetId: 'target-missing' };
+		const unknownType = createFailure(
+			{ id: 'cred-3', name: 'X', type: 'bad', usedBy: [{ kind: 'workflow', id: 'wf-1' }] },
+			'unknown_type',
+		);
+
+		expect(
+			credentialsToStub('create-stub', {
+				successes: new Map(),
+				failures: [stubbable, bound, unknownType],
+			}),
+		).toEqual([stubbable]);
 	});
 
-	it('delegates to the handler for the given mode', async () => {
-		const result = { successes: new Map([['a', 'b']]), failures: [] };
-		await expect(factory.getHandler('must-preexist').handle(result, context)).resolves.toBe(result);
+	it('keeps one failure per source id, in first-seen order', () => {
+		const repeated = notFound('cred-1', ['wf-3']);
+		const other = notFound('cred-2');
+
+		expect(
+			credentialsToStub('create-stub', {
+				successes: new Map(),
+				failures: [notFound('cred-1', ['wf-1']), other, repeated],
+			}),
+		).toEqual([repeated, other]);
 	});
 });

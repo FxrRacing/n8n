@@ -8,14 +8,12 @@ import {
 	N8nCallout,
 	N8nCheckbox,
 	N8nInput,
-	N8nInputLabel,
 	N8nOption,
 	N8nSelect,
-	N8nText,
 } from '@n8n/design-system';
 import CopyInput from '@/app/components/CopyInput.vue';
-import { useToast } from '@/app/composables/useToast';
-import { useSettingsStore } from '@/app/stores/settings.store';
+import { useToast } from '@n8n/composables/useToast';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 
 import { getFxrSsoConfig, saveFxrSsoConfig, testFxrSsoConfig } from './fxrSso.api';
 
@@ -100,146 +98,138 @@ onMounted(load);
 </script>
 
 <template>
-	<div :class="$style.card" data-test-id="fxr-sso-settings">
-		<N8nText tag="h3" size="large" bold>{{ i18n.baseText('settings.fxrSso.title') }}</N8nText>
-		<N8nText size="small" color="text-light" tag="p" :class="$style.intro">
-			{{ i18n.baseText('settings.fxrSso.intro') }}
-		</N8nText>
-
-		<N8nCallout v-if="config?.managedByEnv" theme="warning" :class="$style.block">
+	<!-- Same card and field groups as the upstream SAML/OIDC forms (shared sso-form styles). -->
+	<div data-test-id="fxr-sso-settings">
+		<N8nCallout v-if="config?.managedByEnv" theme="warning" :class="$style.callout">
 			{{ i18n.baseText('settings.fxrSso.managedByEnv') }}
 		</N8nCallout>
 
-		<div v-if="!loading" :class="$style.form">
-			<div :class="$style.block">
+		<div v-if="!loading" :class="$style.card">
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.title') }}</label>
+				<small>{{ i18n.baseText('settings.fxrSso.intro') }}</small>
+			</div>
+
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.callbackUrl') }}</label>
 				<CopyInput
-					:label="i18n.baseText('settings.fxrSso.callbackUrl')"
 					:value="config?.callbackUrl ?? ''"
 					:copy-button-text="i18n.baseText('generic.clickToCopy')"
 				/>
-				<N8nText size="small" color="text-light">{{
-					i18n.baseText('settings.fxrSso.callbackUrl.help')
-				}}</N8nText>
+				<small>{{ i18n.baseText('settings.fxrSso.callbackUrl.help') }}</small>
 			</div>
 
-			<N8nCheckbox
-				v-model="form.enabled"
-				:label="i18n.baseText('settings.fxrSso.enabled')"
-				:disabled="config?.managedByEnv"
-				:class="$style.block"
-			/>
-
-			<div :class="$style.block">
-				<N8nInputLabel :label="i18n.baseText('settings.fxrSso.issuer')" :required="true">
-					<N8nInput
-						v-model="form.issuer"
-						:disabled="config?.managedByEnv"
-						placeholder="https://login.microsoftonline.com/<tenant-id>/v2.0"
-						data-test-id="fxr-sso-issuer"
-					/>
-				</N8nInputLabel>
-			</div>
-
-			<div :class="$style.block">
-				<N8nInputLabel :label="i18n.baseText('settings.fxrSso.clientId')" :required="true">
-					<N8nInput v-model="form.clientId" :disabled="config?.managedByEnv" />
-				</N8nInputLabel>
-			</div>
-
-			<div :class="$style.block">
-				<N8nInputLabel :label="i18n.baseText('settings.fxrSso.clientSecret')">
-					<N8nInput
-						v-model="form.clientSecret"
-						type="password"
-						:disabled="config?.managedByEnv"
-						:placeholder="
-							config?.hasClientSecret ? i18n.baseText('settings.fxrSso.clientSecret.unchanged') : ''
-						"
-					/>
-				</N8nInputLabel>
-			</div>
-
-			<div :class="$style.block">
-				<N8nInputLabel :label="i18n.baseText('settings.fxrSso.allowedDomains')">
-					<N8nInput
-						v-model="form.allowedDomains"
-						:disabled="config?.managedByEnv"
-						placeholder="fxrracing.com"
-					/>
-				</N8nInputLabel>
-				<N8nText size="small" color="text-light">{{
-					i18n.baseText('settings.fxrSso.allowedDomains.help')
-				}}</N8nText>
-			</div>
-
-			<N8nCheckbox
-				v-model="form.autoProvision"
-				:label="i18n.baseText('settings.fxrSso.autoProvision')"
-				:disabled="config?.managedByEnv"
-				:class="$style.block"
-			/>
-
-			<div :class="$style.block">
-				<N8nInputLabel :label="i18n.baseText('settings.fxrSso.defaultRole')">
-					<N8nSelect v-model="form.defaultRole" :disabled="config?.managedByEnv" size="medium">
-						<N8nOption
-							value="global:member"
-							:label="i18n.baseText('settings.fxrSso.role.member')"
-						/>
-						<N8nOption value="global:admin" :label="i18n.baseText('settings.fxrSso.role.admin')" />
-					</N8nSelect>
-				</N8nInputLabel>
-			</div>
-
-			<div :class="$style.block">
-				<N8nInputLabel :label="i18n.baseText('settings.fxrSso.loginLabel')">
-					<N8nInput
-						v-model="form.loginLabel"
-						:disabled="config?.managedByEnv"
-						placeholder="Microsoft"
-					/>
-				</N8nInputLabel>
-			</div>
-
-			<div :class="$style.actions">
-				<N8nButton
-					variant="outline"
-					:loading="testing"
-					:label="i18n.baseText('settings.fxrSso.test')"
-					data-test-id="fxr-sso-test"
-					@click="test"
-				/>
-				<N8nButton
-					v-if="!config?.managedByEnv"
-					:loading="saving"
-					:label="i18n.baseText('settings.fxrSso.save')"
-					data-test-id="fxr-sso-save"
-					@click="save"
+			<div :class="[$style.group, $style.checkboxGroup]">
+				<N8nCheckbox
+					v-model="form.enabled"
+					:label="i18n.baseText('settings.fxrSso.enabled')"
+					:disabled="config?.managedByEnv"
+					data-test-id="fxr-sso-enabled"
 				/>
 			</div>
+
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.issuer') }}</label>
+				<N8nInput
+					v-model="form.issuer"
+					:disabled="config?.managedByEnv"
+					placeholder="https://login.microsoftonline.com/<tenant-id>/v2.0"
+					data-test-id="fxr-sso-issuer"
+				/>
+			</div>
+
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.clientId') }}</label>
+				<N8nInput
+					v-model="form.clientId"
+					:disabled="config?.managedByEnv"
+					data-test-id="fxr-sso-client-id"
+				/>
+			</div>
+
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.clientSecret') }}</label>
+				<N8nInput
+					v-model="form.clientSecret"
+					type="password"
+					:disabled="config?.managedByEnv"
+					:placeholder="
+						config?.hasClientSecret ? i18n.baseText('settings.fxrSso.clientSecret.unchanged') : ''
+					"
+					data-test-id="fxr-sso-client-secret"
+				/>
+			</div>
+
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.allowedDomains') }}</label>
+				<N8nInput
+					v-model="form.allowedDomains"
+					:disabled="config?.managedByEnv"
+					placeholder="fxrracing.com"
+					data-test-id="fxr-sso-allowed-domains"
+				/>
+				<small>{{ i18n.baseText('settings.fxrSso.allowedDomains.help') }}</small>
+			</div>
+
+			<div :class="[$style.group, $style.checkboxGroup]">
+				<N8nCheckbox
+					v-model="form.autoProvision"
+					:label="i18n.baseText('settings.fxrSso.autoProvision')"
+					:disabled="config?.managedByEnv"
+					data-test-id="fxr-sso-auto-provision"
+				/>
+			</div>
+
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.defaultRole') }}</label>
+				<N8nSelect
+					v-model="form.defaultRole"
+					:disabled="config?.managedByEnv"
+					size="medium"
+					data-test-id="fxr-sso-default-role"
+				>
+					<N8nOption value="global:member" :label="i18n.baseText('settings.fxrSso.role.member')" />
+					<N8nOption value="global:admin" :label="i18n.baseText('settings.fxrSso.role.admin')" />
+				</N8nSelect>
+			</div>
+
+			<div :class="$style.group">
+				<label>{{ i18n.baseText('settings.fxrSso.loginLabel') }}</label>
+				<N8nInput
+					v-model="form.loginLabel"
+					:disabled="config?.managedByEnv"
+					placeholder="Microsoft"
+					data-test-id="fxr-sso-login-label"
+				/>
+			</div>
+		</div>
+
+		<div v-if="!loading" :class="$style.actions">
+			<N8nButton
+				variant="outline"
+				size="large"
+				:loading="testing"
+				:label="i18n.baseText('settings.fxrSso.test')"
+				data-test-id="fxr-sso-test"
+				@click="test"
+			/>
+			<N8nButton
+				v-if="!config?.managedByEnv"
+				size="large"
+				:loading="saving"
+				:label="i18n.baseText('settings.fxrSso.save')"
+				data-test-id="fxr-sso-save"
+				@click="save"
+			/>
 		</div>
 	</div>
 </template>
 
 <style lang="scss" module>
-.card {
-	padding: var(--spacing--lg);
-	border: var(--border-width) var(--border-style) var(--color--foreground);
-	border-radius: var(--radius);
-	background: var(--color--background--light-3);
-}
+@use '@/features/settings/sso/styles/sso-form.module.scss';
 
-.intro {
-	margin-bottom: var(--spacing--md);
-}
-
-.form {
-	display: flex;
-	flex-direction: column;
-}
-
-.block {
-	margin-bottom: var(--spacing--md);
+.callout {
+	margin-bottom: var(--spacing--lg);
 }
 
 .actions {

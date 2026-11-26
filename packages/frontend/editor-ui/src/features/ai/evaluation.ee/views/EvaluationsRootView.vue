@@ -2,8 +2,8 @@
 import { useUsageStore } from '@/features/settings/usage/usage.store';
 import { useAsyncState } from '@vueuse/core';
 import { EVALUATIONS_DOCS_URL, VIEWS } from '@/app/constants';
-import { useTelemetry } from '@/app/composables/useTelemetry';
-import { useToast } from '@/app/composables/useToast';
+import { useTelemetry } from '@n8n/composables/useTelemetry';
+import { useToast } from '@n8n/composables/useToast';
 import { useI18n } from '@n8n/i18n';
 import { useEvaluationStore } from '../evaluation.store';
 import { useSourceControlStore } from '@/features/integrations/sourceControl.ee/sourceControl.store';
@@ -18,6 +18,7 @@ import EvaluationsEmptyState from '../components/EvaluationsEmptyState/Evaluatio
 import { N8nCallout, N8nLink, N8nText } from '@n8n/design-system';
 import { useWorkflowEvaluationState } from '../composables/useWorkflowEvaluationState';
 import { useEvaluationsWizardSidepanelExperiment } from '@/experiments/evaluationsWizardSidepanel/useEvaluationsWizardSidepanelExperiment';
+import { useEvaluationsLicense } from '../composables/useEvaluationsLicense';
 const props = defineProps<{
 	workflowId: string;
 }>();
@@ -34,9 +35,7 @@ const router = useRouter();
 const { isFeatureEnabled: isEvaluationsWizardSidepanelEnabled } =
 	useEvaluationsWizardSidepanelExperiment();
 
-const evaluationsLicensed = computed(() => {
-	return usageStore.workflowsWithEvaluationsLimit !== 0;
-});
+const { isLicensed } = useEvaluationsLicense();
 
 const isProtectedEnvironment = computed(() => {
 	return sourceControlStore.preferences.branchReadOnly;
@@ -152,7 +151,12 @@ watch(
 			opened — same destination the floating CTA above already targets.
 		-->
 		<template v-if="isReady && showWizard && isEvaluationsWizardSidepanelEnabled">
-			<EvaluationsEmptyState :disabled="isProtectedEnvironment" @get-started="openWizardOnCanvas" />
+			<EvaluationsPaywall v-if="!isLicensed" />
+			<EvaluationsEmptyState
+				v-else
+				:disabled="isProtectedEnvironment"
+				@get-started="openWizardOnCanvas"
+			/>
 		</template>
 		<template v-else-if="isReady && showWizard">
 			<div :class="$style.setupContent">
@@ -179,11 +183,19 @@ watch(
 						src="https://www.youtube.com/embed/5LlF196PKaE"
 						title="n8n Evaluation quickstart"
 						frameborder="0"
-						allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+						allow="
+							accelerometer;
+							autoplay;
+							clipboard-write;
+							encrypted-media;
+							gyroscope;
+							picture-in-picture;
+							web-share;
+						"
 						referrerpolicy="strict-origin-when-cross-origin"
 						allowfullscreen
 					></iframe>
-					<SetupWizard v-if="evaluationsLicensed" @run-test="runTest" />
+					<SetupWizard v-if="isLicensed" @run-test="runTest" />
 					<EvaluationsPaywall v-else />
 				</div>
 			</div>

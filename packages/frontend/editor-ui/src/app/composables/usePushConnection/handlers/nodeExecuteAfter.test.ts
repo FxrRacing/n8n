@@ -23,7 +23,10 @@ vi.mock('@/features/execution/executions/executions.utils', async (importOrigina
 	return { ...actual, openFormPopupWindow: vi.fn() };
 });
 
+vi.mock('./trackNodeExecution', () => ({ trackNodeExecution: vi.fn() }));
+
 import { openFormPopupWindow } from '@/features/execution/executions/executions.utils';
+import { trackNodeExecution } from './trackNodeExecution';
 
 describe('nodeExecuteAfter', () => {
 	const documentId = createWorkflowDocumentId('test-wf');
@@ -33,6 +36,7 @@ describe('nodeExecuteAfter', () => {
 
 	beforeEach(() => {
 		vi.mocked(openFormPopupWindow).mockClear();
+		vi.mocked(trackNodeExecution).mockClear();
 		setActivePinia(createPinia());
 
 		options = { router: mock<Router>(), documentId };
@@ -55,12 +59,14 @@ describe('nodeExecuteAfter', () => {
 
 	it('should update node execution data with placeholder and remove executing node', async () => {
 		const assistantStore = useAssistantStore();
+		const clearAgentNodeProgress = vi.spyOn(workflowExecutionStateStore, 'clearAgentNodeProgress');
 
 		const event: NodeExecuteAfter = {
 			type: 'nodeExecuteAfter',
 			data: {
 				executionId: 'exec-1',
 				nodeName: 'Test Node',
+				sequenceNumber: 1,
 				itemCountByConnectionType: { main: [2, 1] },
 				data: {
 					executionTime: 100,
@@ -76,7 +82,9 @@ describe('nodeExecuteAfter', () => {
 		expect(workflowExecutionStateStore.executingNode.removeExecutingNode).toHaveBeenCalledTimes(1);
 		expect(workflowExecutionStateStore.executingNode.removeExecutingNode).toHaveBeenCalledWith(
 			'Test Node',
+			0,
 		);
+		expect(clearAgentNodeProgress).toHaveBeenCalledWith('Test Node');
 		expect(assistantStore.onNodeExecution).toHaveBeenCalledTimes(1);
 		expect(assistantStore.onNodeExecution).toHaveBeenCalledWith(event.data);
 
@@ -91,6 +99,32 @@ describe('nodeExecuteAfter', () => {
 		});
 	});
 
+	it('tracks a non-waiting node execution exactly once', async () => {
+		const event: NodeExecuteAfter = {
+			type: 'nodeExecuteAfter',
+			data: {
+				executionId: 'exec-1',
+				nodeName: 'Test Node',
+				sequenceNumber: 1,
+				itemCountByConnectionType: { main: [1] },
+				data: {
+					executionTime: 100,
+					startTime: 1234567890,
+					executionIndex: 0,
+					source: [],
+				},
+			},
+		};
+
+		await nodeExecuteAfter(event, options);
+
+		expect(trackNodeExecution).toHaveBeenCalledTimes(1);
+		expect(trackNodeExecution).toHaveBeenCalledWith(
+			event.data,
+			workflowExecutionStateStore.workflowId,
+		);
+	});
+
 	it('should skip when the execution id does not match the active execution', async () => {
 		const assistantStore = useAssistantStore();
 		// onNodeExecution is a shared module-level mock; reset its call history so
@@ -102,6 +136,7 @@ describe('nodeExecuteAfter', () => {
 			data: {
 				executionId: 'other-exec',
 				nodeName: 'Test Node',
+				sequenceNumber: 1,
 				itemCountByConnectionType: { main: [1] },
 				data: {
 					executionTime: 100,
@@ -127,6 +162,7 @@ describe('nodeExecuteAfter', () => {
 			data: {
 				executionId: 'exec-1',
 				nodeName: 'Test Node',
+				sequenceNumber: 1,
 				itemCountByConnectionType: {
 					main: [3],
 					ai_memory: [1, 2],
@@ -164,6 +200,7 @@ describe('nodeExecuteAfter', () => {
 			data: {
 				executionId: 'exec-1',
 				nodeName: 'Test Node',
+				sequenceNumber: 1,
 				itemCountByConnectionType: {},
 				data: {
 					executionTime: 100,
@@ -188,6 +225,7 @@ describe('nodeExecuteAfter', () => {
 			data: {
 				executionId: 'exec-1',
 				nodeName: 'Test Node',
+				sequenceNumber: 1,
 				itemCountByConnectionType: { main: [1] },
 				data: {
 					executionTime: 100,
@@ -221,6 +259,7 @@ describe('nodeExecuteAfter', () => {
 			data: {
 				executionId: 'exec-1',
 				nodeName: 'Test Node',
+				sequenceNumber: 1,
 				itemCountByConnectionType: {
 					main: [1],
 					// @ts-expect-error Testing invalid connection type
@@ -254,6 +293,7 @@ describe('nodeExecuteAfter', () => {
 			data: {
 				executionId: 'exec-1',
 				nodeName: 'Wait',
+				sequenceNumber: 1,
 				itemCountByConnectionType: {},
 				data: {
 					executionTime: 0,
@@ -277,6 +317,7 @@ describe('nodeExecuteAfter', () => {
 			data: {
 				executionId: 'exec-1',
 				nodeName: 'Wait',
+				sequenceNumber: 1,
 				itemCountByConnectionType: {},
 				data: {
 					executionTime: 0,

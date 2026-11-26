@@ -1,954 +1,444 @@
-import { ControllerRegistryMetadata } from '@n8n/decorators';
-import { Container } from '@n8n/di';
-import { mock } from 'jest-mock-extended';
-import multer from 'multer';
+import { UpdateAgentDto } from '@n8n/api-types';
+import type { Mocked } from 'vitest';
+import type { Response } from 'express';
+import { mock } from 'vitest-mock-extended';
 
+import { LockedError } from '@n8n/errors';
 import type { CredentialsService } from '@/credentials/credentials.service';
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
+import type { FolderService } from '@/services/folder.service';
 
-import type { AgentsService } from '../agents.service';
-import type { AgentsBuilderService } from '../builder/agents-builder.service';
-import type { ChatIntegrationRegistry } from '../integrations/agent-chat-integration';
-import type { ChatIntegrationService } from '../integrations/chat-integration.service';
-import type { SlackAppSetupService } from '../integrations/slack-app-setup.service';
-import type { AgentExecutionService } from '../agent-execution.service';
-import type { AgentTaskService } from '../agent-task.service';
-import type { AgentKnowledgeService } from '../agent-knowledge.service';
-import type { AgentRepository } from '../repositories/agent.repository';
-import { AgentsController } from '../agents.controller';
 import { AgentsCredentialProvider } from '../adapters/agents-credential-provider';
-
-const UNAUTHENTICATED_HANDLERS = new Set([
-	// Third-party webhook callback: no req.user; per-platform signature
-	// verification happens inside the platform handler.
-	'handleWebhook',
-	// Slack OAuth callback: no req.user; the one-time state token created
-	// during authenticated setup binds the callback to a user, project, and agent.
-	'handleSlackAppOAuthCallback',
-]);
-
-const metadata = Container.get(ControllerRegistryMetadata).getControllerMetadata(
-	AgentsController as never,
-);
-
-const routeCases = Array.from(metadata.routes.entries()).map(([handlerName, route]) => ({
-	handlerName,
-	route,
-}));
+import type { AgentDefaultModelResolverService } from '../agent-default-model-resolver.service';
+import type { AgentPublishService } from '../agent-publish.service';
+import type { AgentConfigService } from '../agent-config.service';
+import { AgentResponseMapper } from '../agent-response.mapper';
+import { AgentRunnableStateService } from '../agent-runnable-state.service';
+import type { AgentsService } from '../agents.service';
+import type { AgentValidationService } from '../agent-validation.service';
+import { AgentsController } from '../agents.controller';
+import type { AgentWriteLockService } from '../agent-write-lock.service';
+import {
+	expectProjectScopedAgentRoutes,
+	getRoutesByHandlerName,
+} from './test-utils/controller-route-metadata';
+import { createAgentSkillRefsService } from './test-utils/stored-agent-config';
 
 function makeController({
-	agentsService = mock<AgentsService>(),
+	agentsService = mock<
+		Pick<
+			AgentsService,
+			'createOrAdopt' | 'findById' | 'findByProjectId' | 'findByProjectIdPaginated' | 'delete'
+		>
+	>(),
+	agentPublishService = mock<AgentPublishService>(),
+	agentValidationService = mock<AgentValidationService>(),
 	credentialsService = mock<CredentialsService>(),
-	chatIntegrationService = mock<ChatIntegrationService>(),
-	agentRepository = mock<AgentRepository>(),
-	chatIntegrationRegistry = mock<ChatIntegrationRegistry>(),
-	slackAppSetupService = mock<SlackAppSetupService>(),
-	agentTaskService = mock<AgentTaskService>(),
-	agentKnowledgeService = mock<AgentKnowledgeService>(),
+	agentDefaultModelResolverService = mock<AgentDefaultModelResolverService>(),
+	agentWriteLockService = mock<AgentWriteLockService>(),
+	agentConfigService = mock<AgentConfigService>(),
+	skillRefs = createAgentSkillRefsService(),
 }: {
-	agentsService?: jest.Mocked<AgentsService>;
-	credentialsService?: jest.Mocked<CredentialsService>;
-	chatIntegrationService?: jest.Mocked<ChatIntegrationService>;
-	agentRepository?: jest.Mocked<AgentRepository>;
-	chatIntegrationRegistry?: jest.Mocked<ChatIntegrationRegistry>;
-	slackAppSetupService?: jest.Mocked<SlackAppSetupService>;
-	agentTaskService?: jest.Mocked<AgentTaskService>;
-	agentKnowledgeService?: jest.Mocked<AgentKnowledgeService>;
+	agentsService?: Mocked<
+		Pick<
+			AgentsService,
+			'createOrAdopt' | 'findById' | 'findByProjectId' | 'findByProjectIdPaginated' | 'delete'
+		>
+	>;
+	agentPublishService?: Mocked<AgentPublishService>;
+	agentValidationService?: Mocked<AgentValidationService>;
+	credentialsService?: Mocked<CredentialsService>;
+	agentDefaultModelResolverService?: Mocked<AgentDefaultModelResolverService>;
+	agentWriteLockService?: Mocked<AgentWriteLockService>;
+	agentConfigService?: Mocked<AgentConfigService>;
+	skillRefs?: ReturnType<typeof createAgentSkillRefsService>;
 } = {}) {
-	if (!chatIntegrationRegistry.require.getMockImplementation()) {
-		chatIntegrationRegistry.require.mockImplementation(
-			(type: string) =>
-				({
-					type,
-					displayLabel: type,
-					credentialTypes: type === 'telegram' ? ['telegramApi'] : [`${type}Api`],
-				}) as never,
-		);
-	}
-
-	// Default the knowledge-base module to enabled so file-endpoint tests pass;
-	// the disabled-gating test overrides this on the returned mock.
-	agentsService.isKnowledgeBaseModuleEnabled.mockReturnValue(true);
-
-	const controller = new AgentsController(
-		agentsService,
-		mock<AgentsBuilderService>(),
+	const agentRunnableStateService = new AgentRunnableStateService(
 		credentialsService,
-		chatIntegrationService,
-		agentRepository,
-		mock<AgentExecutionService>(),
-		chatIntegrationRegistry,
-		slackAppSetupService,
-		agentTaskService,
-		agentKnowledgeService,
+		agentValidationService,
+		agentPublishService,
+		skillRefs,
+	);
+	const agentResponseMapper = new AgentResponseMapper(
+		agentRunnableStateService,
+		mock<FolderService>(),
 	);
 
 	return {
-		controller,
+		controller: new AgentsController(
+			agentsService as unknown as AgentsService,
+			agentResponseMapper,
+			agentDefaultModelResolverService,
+			agentWriteLockService,
+			agentConfigService,
+		),
 		agentsService,
-		credentialsService,
-		chatIntegrationService,
-		agentRepository,
-		chatIntegrationRegistry,
-		slackAppSetupService,
-		agentTaskService,
-		agentKnowledgeService,
+		agentPublishService,
+		agentValidationService,
+		agentConfigService,
+		agentWriteLockService,
 	};
 }
 
 describe('AgentsController route access scopes', () => {
-	it.each(routeCases)(
-		'$handlerName is gated by a project-scoped agent:* check',
-		({ handlerName, route }) => {
-			if (UNAUTHENTICATED_HANDLERS.has(handlerName)) {
-				expect(route.accessScope).toBeUndefined();
-				expect(route.skipAuth).toBe(true);
-				return;
-			}
+	expectProjectScopedAgentRoutes(AgentsController);
 
-			expect(route.accessScope).toBeDefined();
-			expect(route.accessScope?.globalOnly).toBe(false);
-			expect(route.accessScope?.scope.startsWith('agent:')).toBe(true);
+	const routes = getRoutesByHandlerName(AgentsController);
+
+	it.each([
+		['create', 'agent:create'],
+		['list', 'agent:list'],
+		['get', 'agent:read'],
+		['update', 'agent:update'],
+		['delete', 'agent:delete'],
+	])('%s uses %s', (handlerName, scope) => {
+		expect(routes.get(handlerName)?.accessScope?.scope).toBe(scope);
+	});
+});
+
+describe('AgentsController create', () => {
+	const req = { params: { projectId: 'project-1' }, user: { id: 'user-1' } } as never;
+
+	function makeCreateController(createdId: string) {
+		const agentPublishService = mock<AgentPublishService>();
+		const agentValidationService = mock<AgentValidationService>();
+		const agentsService = mock<Pick<AgentsService, 'createOrAdopt'>>();
+		const agentDefaultModelResolverService = mock<AgentDefaultModelResolverService>();
+		agentsService.createOrAdopt.mockResolvedValue({
+			agent: { id: createdId, projectId: 'project-1' },
+			config: null,
+			configHash: null,
+			adopted: false,
+		} as never);
+		agentDefaultModelResolverService.resolve.mockResolvedValue(null);
+		agentValidationService.validateLoadedAgentConfiguration.mockResolvedValue({
+			status: 'valid',
+			issues: [],
+		});
+		agentPublishService.hasPublishHistory.mockResolvedValue(false);
+
+		const { controller } = makeController({
+			agentsService: agentsService as never,
+			agentPublishService,
+			agentValidationService,
+			agentDefaultModelResolverService,
+		});
+		return { controller, agentsService, agentDefaultModelResolverService };
+	}
+
+	it('creates the agent under the id the client minted', async () => {
+		const { controller, agentsService } = makeCreateController('aBcDeFgHiJkLmNoP');
+
+		await controller.create(req, mock<Response>(), {
+			name: 'Support Agent',
+			id: 'aBcDeFgHiJkLmNoP',
+		} as never);
+
+		expect(agentsService.createOrAdopt).toHaveBeenCalledWith('project-1', 'Support Agent', {
+			actor: { kind: 'user', user: { id: 'user-1' } },
+			user: { id: 'user-1' },
+			createdBy: 'user',
+			pushRef: undefined,
+			config: undefined,
+			id: 'aBcDeFgHiJkLmNoP',
+		});
+	});
+
+	it('lets the backend mint the id when the client did not supply one', async () => {
+		const { controller, agentsService } = makeCreateController('server-minted');
+
+		await controller.create(req, mock<Response>(), { name: 'Support Agent' } as never);
+
+		expect(agentsService.createOrAdopt).toHaveBeenCalledWith('project-1', 'Support Agent', {
+			actor: { kind: 'user', user: { id: 'user-1' } },
+			user: { id: 'user-1' },
+			createdBy: 'user',
+			pushRef: undefined,
+			config: undefined,
+			id: undefined,
+		});
+	});
+
+	it('passes the requested tag ids to the creation options', async () => {
+		const { controller, agentsService } = makeCreateController('tagged-agent');
+
+		await controller.create(req, mock<Response>(), {
+			name: 'Support Agent',
+			tags: ['tag-1', 'tag-2'],
+		} as never);
+
+		expect(agentsService.createOrAdopt).toHaveBeenCalledWith(
+			'project-1',
+			'Support Agent',
+			expect.objectContaining({ tagIds: ['tag-1', 'tag-2'] }),
+		);
+	});
+
+	it('passes initial configuration and returns the committed autosave baseline', async () => {
+		const { controller, agentsService, agentDefaultModelResolverService } =
+			makeCreateController('new-agent');
+		const config = { name: 'Support Agent', model: '', instructions: 'Help users' };
+		const agent = {
+			id: 'new-agent',
+			name: config.name,
+			projectId: 'project-1',
+			versionId: 'v1',
+			schema: config,
+			integrations: [],
+			tools: {},
+			createdAt: new Date('2026-01-01T00:00:00.000Z'),
+			updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+		};
+		agentsService.createOrAdopt.mockResolvedValue({
+			agent,
+			config,
+			configHash: 'saved-hash',
+			adopted: false,
+		} as never);
+
+		const result = await controller.create(req, mock<Response>(), { name: config.name, config });
+
+		expect(agentsService.createOrAdopt).toHaveBeenCalledWith(
+			'project-1',
+			config.name,
+			expect.objectContaining({ config, user: { id: 'user-1' }, createdBy: 'user' }),
+		);
+		expect(agentDefaultModelResolverService.resolve).not.toHaveBeenCalled();
+		expect(result).toMatchObject({
+			id: 'new-agent',
+			versionId: 'v1',
+			config,
+			adopted: false,
+		});
+		expect(result.configHash).toMatch(/^[a-f0-9]{64}$/);
+		expect(result).not.toHaveProperty('schema');
+	});
+
+	it.each([undefined, { name: 'Support Agent', model: '', instructions: 'Help users' }])(
+		'seeds the default model only when the config is omitted: %j',
+		async (config) => {
+			const { controller, agentsService, agentDefaultModelResolverService } =
+				makeCreateController('server-minted');
+			agentDefaultModelResolverService.resolve.mockResolvedValue({
+				model: 'openai/gpt-5-mini',
+				credential: 'managed',
+			});
+
+			await controller.create(req, mock<Response>(), { name: 'Support Agent', config });
+
+			expect(agentsService.createOrAdopt).toHaveBeenCalledWith('project-1', 'Support Agent', {
+				actor: { kind: 'user', user: { id: 'user-1' } },
+				user: { id: 'user-1' },
+				createdBy: 'user',
+				pushRef: undefined,
+				config,
+				id: undefined,
+				...(config === undefined
+					? { defaultModel: { model: 'openai/gpt-5-mini', credential: 'managed' } }
+					: {}),
+			});
+			expect(agentDefaultModelResolverService.resolve).toHaveBeenCalledTimes(
+				config === undefined ? 1 : 0,
+			);
 		},
 	);
 
-	it.each([
-		['listSkills', 'agent:read'],
-		['getSkill', 'agent:read'],
-		['createSkill', 'agent:update'],
-		['updateSkill', 'agent:update'],
-		['deleteSkill', 'agent:update'],
-		['revertToPublished', 'agent:update'],
-		['listFiles', 'agent:read'],
-		['uploadFiles', 'agent:update'],
-		['deleteFile', 'agent:update'],
-		['revertToVersion', 'agent:update'],
-		['createSlackApp', 'agent:update'],
-		['getSlackAppManifest', 'agent:read'],
-		['listTasks', 'agent:read'],
-		['createTask', 'agent:update'],
-		['updateTask', 'agent:update'],
-		['deleteTask', 'agent:update'],
-		['runTaskNow', 'agent:execute'],
-		['listVersions', 'agent:read'],
-	])('%s uses %s', (handlerName, scope) => {
-		expect(metadata.routes.get(handlerName)?.accessScope?.scope).toBe(scope);
+	it('seeds the schema, skills, and tools for a duplicate and skips default-model resolution', async () => {
+		const { controller, agentsService, agentDefaultModelResolverService } =
+			makeCreateController('agent-copy');
+		const skills = { skill1: { name: 'Triage', instructions: 'Sort tickets.' } };
+		const tools = { tool1: { code: 'return []', descriptor: { name: 'Lookup' } } };
+		const schema = {
+			name: 'Source Agent',
+			model: 'anthropic/claude-sonnet-5-5',
+			instructions: 'Triage tickets.',
+			integrations: [{ type: 'slack', credentialId: 'cred-slack-1' }],
+		};
+
+		await controller.create(req, mock<Response>(), {
+			name: 'Source Agent Copy',
+			schema,
+			skills,
+			tools,
+		} as never);
+
+		// A duplicate carries its own model, so the resolver is never called.
+		expect(agentDefaultModelResolverService.resolve).not.toHaveBeenCalled();
+		// The duplicate is a user-driven write, so the controller threads the
+		// user through — the service blanks inaccessible credentials and copies
+		// channels as drafts off that flag.
+		expect(agentsService.createOrAdopt).toHaveBeenCalledWith(
+			'project-1',
+			'Source Agent Copy',
+			expect.objectContaining({
+				schema: expect.objectContaining({ model: 'anthropic/claude-sonnet-5-5' }),
+				skills,
+				tools,
+				user: { id: 'user-1' },
+			}),
+		);
+		// No default model is resolved for a duplicate.
+		const [, , options] = agentsService.createOrAdopt.mock.calls[0] as [
+			string,
+			string,
+			Record<string, unknown>,
+		];
+		expect(options).not.toHaveProperty('defaultModel');
+	});
+
+	it('overrides the schema name with the entity name on a duplicate', async () => {
+		const { controller, agentsService } = makeCreateController('agent-copy');
+		const schema = {
+			name: 'Source Agent',
+			model: 'anthropic/claude-sonnet-5-5',
+			instructions: 'Triage tickets.',
+		};
+
+		await controller.create(req, mock<Response>(), {
+			name: 'Source Agent Copy',
+			schema,
+		} as never);
+
+		// The config name is kept in sync with the entity name so the list and
+		// the builder never disagree on a directly-seeded create.
+		expect(agentsService.createOrAdopt).toHaveBeenCalledWith(
+			'project-1',
+			'Source Agent Copy',
+			expect.objectContaining({
+				schema: { ...schema, name: 'Source Agent Copy' },
+			}),
+		);
 	});
 });
 
-describe('AgentsController tasks', () => {
-	const agent = { id: 'agent-1', projectId: 'project-1' } as never;
-	const req = { params: { projectId: 'project-1' } } as never;
+describe('AgentsController list', () => {
+	const req = { params: { projectId: 'project-1' }, query: {}, user: { id: 'user-1' } } as never;
 
-	it('lists tasks for the agent', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent);
-		const tasks = [{ id: 'task-1' }] as never;
-		agentTaskService.list.mockResolvedValue(tasks);
+	it('uses backend listing when no query options are provided', async () => {
+		const { controller, agentsService } = makeController();
+		const response = { count: 1, data: [{ id: 'agent-1' }] } as never;
+		const res = mock<Response>();
+		const query = {
+			offset: 0,
+			limit: 10,
+		} as never;
+		agentsService.findByProjectIdPaginated.mockResolvedValue(response);
 
-		const result = await controller.listTasks(req, undefined as never, 'agent-1');
+		await controller.list(req, res, query);
 
-		expect(agentTaskService.list).toHaveBeenCalledWith('agent-1');
-		expect(result).toBe(tasks);
+		expect(agentsService.findByProjectIdPaginated).toHaveBeenCalledWith('project-1', query);
+		expect(agentsService.findByProjectId).not.toHaveBeenCalled();
+		expect(res.json).toHaveBeenCalledWith({
+			count: 1,
+			data: [expect.objectContaining({ id: 'agent-1', hasConfig: false, personalisation: null })],
+		});
+		expect(res.json.mock.calls[0]?.[0].data[0]).not.toHaveProperty('config');
 	});
 
-	it('404s when listing tasks for an agent outside the project', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(null);
-
-		await expect(controller.listTasks(req, undefined as never, 'agent-1')).rejects.toThrow(
-			NotFoundError,
-		);
-		expect(agentTaskService.list).not.toHaveBeenCalled();
-	});
-
-	it('creates a task', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent);
-		const created = { id: 'task-1' } as never;
-		agentTaskService.create.mockResolvedValue(created);
-		const payload = {
-			name: 'Daily',
-			objective: 'Do X',
-			cronExpression: '0 9 * * *',
-			enabled: true,
+	it('uses backend listing when pagination, sorting, or filters are provided', async () => {
+		const { controller, agentsService } = makeController();
+		const response = { count: 1, data: [{ id: 'agent-1' }] } as never;
+		const res = mock<Response>();
+		const query = {
+			offset: 0,
+			limit: 50,
+			sortBy: 'name:asc',
+			filter: { query: 'support' },
+		} as never;
+		agentsService.findByProjectIdPaginated.mockResolvedValue(response);
+		const listReq = {
+			params: { projectId: 'project-1' },
+			query: { offset: '0', limit: '50', sortBy: 'name:asc', filter: '{"query":"support"}' },
+			user: { id: 'user-1' },
 		} as never;
 
-		const result = await controller.createTask(req, undefined as never, 'agent-1', payload);
+		await controller.list(listReq, res, query);
 
-		expect(agentTaskService.create).toHaveBeenCalledWith('agent-1', payload);
-		expect(result).toBe(created);
+		expect(agentsService.findByProjectIdPaginated).toHaveBeenCalledWith('project-1', query);
+		expect(agentsService.findByProjectId).not.toHaveBeenCalled();
+		expect(res.json).toHaveBeenCalledWith({
+			count: 1,
+			data: [
+				expect.objectContaining({
+					id: 'agent-1',
+					hasConfig: false,
+					personalisation: null,
+				}),
+			],
+		});
+		expect(res.json.mock.calls[0]?.[0].data[0]).not.toHaveProperty('config');
 	});
 
-	it('updates a task', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent);
-		const updated = { id: 'task-1' } as never;
-		agentTaskService.update.mockResolvedValue(updated);
-		const payload = { name: 'Renamed' } as never;
-
-		const result = await controller.updateTask(
-			req,
-			undefined as never,
-			'agent-1',
-			'task-1',
-			payload,
-		);
-
-		expect(agentTaskService.update).toHaveBeenCalledWith('agent-1', 'task-1', payload);
-		expect(result).toBe(updated);
-	});
-
-	it('deletes a task and returns success', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent);
-
-		const result = await controller.deleteTask(req, undefined as never, 'agent-1', 'task-1');
-
-		expect(agentTaskService.delete).toHaveBeenCalledWith('agent-1', 'task-1');
-		expect(result).toEqual({ success: true });
-	});
-
-	it('404s when deleting a task for an agent outside the project', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(null);
-
-		await expect(
-			controller.deleteTask(req, undefined as never, 'agent-1', 'task-1'),
-		).rejects.toThrow(NotFoundError);
-		expect(agentTaskService.delete).not.toHaveBeenCalled();
-	});
-
-	it('runs a task now as the requesting user', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent);
-		const runReq = { params: { projectId: 'project-1' }, user: { id: 'user-1' } } as never;
-
-		const result = await controller.runTaskNow(runReq, undefined as never, 'agent-1', 'task-1');
-
-		expect(agentTaskService.runNow).toHaveBeenCalledWith('agent-1', 'task-1', 'user-1');
-		expect(result).toEqual({ success: true });
-	});
-
-	it('404s when running a task for an agent outside the project', async () => {
-		const { controller, agentTaskService, agentRepository } = makeController();
-		agentRepository.findByIdAndProjectId.mockResolvedValue(null);
-		const runReq = { params: { projectId: 'project-1' }, user: { id: 'user-1' } } as never;
-
-		await expect(
-			controller.runTaskNow(runReq, undefined as never, 'agent-1', 'task-1'),
-		).rejects.toThrow(NotFoundError);
-		expect(agentTaskService.runNow).not.toHaveBeenCalled();
-	});
-});
-
-describe('AgentsController file uploads', () => {
-	it('rejects empty uploads', async () => {
-		const { controller } = makeController();
-
-		await expect(
-			controller.uploadFiles(
-				{ params: { projectId: 'project-1' }, files: [] } as never,
-				undefined as never,
-				'project-1',
-				'agent-1',
-			),
-		).rejects.toThrow(BadRequestError);
-	});
-
-	it('maps multer upload validation errors to bad requests', async () => {
-		const { controller } = makeController();
-
-		await expect(
-			controller.uploadFiles(
-				{
-					params: { projectId: 'project-1' },
-					fileUploadError: new multer.MulterError('LIMIT_FILE_COUNT'),
-				} as never,
-				undefined as never,
-				'project-1',
-				'agent-1',
-			),
-		).rejects.toThrow(BadRequestError);
-	});
-});
-
-describe('AgentsController knowledge base gating', () => {
-	it('returns not found for file endpoints when the knowledge-base module is disabled', async () => {
+	it('copies personalisation onto the list item and leaves config off it', async () => {
 		const { controller, agentsService } = makeController();
-		agentsService.isKnowledgeBaseModuleEnabled.mockReturnValue(false);
-
-		await expect(
-			controller.listFiles(
-				{ params: { projectId: 'project-1' } } as never,
-				undefined as never,
-				'project-1',
-				'agent-1',
-			),
-		).rejects.toThrow(NotFoundError);
-		await expect(
-			controller.uploadFiles(
-				{ params: { projectId: 'project-1' }, files: [] } as never,
-				undefined as never,
-				'project-1',
-				'agent-1',
-			),
-		).rejects.toThrow(NotFoundError);
-		await expect(
-			controller.deleteFile(
-				{ params: { projectId: 'project-1' } } as never,
-				undefined as never,
-				'project-1',
-				'agent-1',
-				'file-1',
-			),
-		).rejects.toThrow(NotFoundError);
-	});
-});
-
-describe('AgentsController publish history', () => {
-	it('lists publish history with pagination forwarded from the query', async () => {
-		const { controller, agentsService } = makeController();
-		agentsService.listPublishHistory.mockResolvedValue([
-			{
-				versionId: 'v2',
-				agentId: 'agent-1',
-				createdAt: '2026-01-02T00:00:00.000Z',
-				updatedAt: '2026-01-02T00:00:00.000Z',
-				author: 'Ada Lovelace',
-				isActive: true,
-			},
-		]);
-
-		const result = await controller.listVersions(
-			{ params: { projectId: 'project-1', agentId: 'agent-1' } } as never,
-			undefined as never,
-			'agent-1',
-			{ take: 5, skip: 10 } as never,
-		);
-
-		expect(agentsService.listPublishHistory).toHaveBeenCalledWith('agent-1', 'project-1', 5, 10);
-		expect(result).toHaveLength(1);
-		expect(result[0].isActive).toBe(true);
-	});
-});
-
-describe('AgentsController revert to version', () => {
-	it('forwards the parsed versionId to the service and returns the agent with runnable state', async () => {
-		const { controller, agentsService } = makeController();
-		agentsService.revertToVersion.mockResolvedValue({
-			id: 'agent-1',
-			projectId: 'project-1',
-		} as never);
-		agentsService.validateAgentIsRunnable.mockResolvedValue({ missing: [] });
-
-		const result = await controller.revertToVersion(
-			{
-				params: { projectId: 'project-1' },
-				user: { id: 'user-1' },
-			} as never,
-			undefined as never,
-			'agent-1',
-			{ versionId: 'v1' } as never,
-		);
-
-		expect(agentsService.revertToVersion).toHaveBeenCalledWith('agent-1', 'project-1', 'v1');
-		expect(result).toEqual(
-			expect.objectContaining({
-				id: 'agent-1',
-				isRunnable: true,
-			}),
-		);
-	});
-});
-
-describe('AgentsController integration credentials', () => {
-	it('rejects credentials that are not usable in the agent project', async () => {
-		const credentialsService = mock<CredentialsService>();
-		credentialsService.getCredentialsAUserCanUseInAWorkflow.mockResolvedValue([
-			{
-				id: 'cred-allowed',
-				name: 'Allowed Slack',
-				type: 'slackApi',
-				createdAt: '2024-01-01T00:00:00.000Z',
-				updatedAt: '2024-01-01T00:00:00.000Z',
-				scopes: [],
-				isManaged: false,
-				isGlobal: false,
-				isResolvable: true,
-				currentUserHasAccess: true,
-				homeProject: null,
-				sharedWithProjects: [],
-			},
-		]);
-
-		const chatIntegrationService = mock<ChatIntegrationService>();
-		const agentRepository = mock<AgentRepository>();
-		agentRepository.findByIdAndProjectId.mockResolvedValue({
-			id: 'agent-1',
-			projectId: 'project-1',
-			activeVersionId: 'v1',
-			activeVersion: {},
-			integrations: [],
-		} as never);
-
-		const controller = new AgentsController(
-			mock<AgentsService>(),
-			mock<AgentsBuilderService>(),
-			credentialsService,
-			chatIntegrationService,
-			agentRepository,
-			mock<AgentExecutionService>(),
-			mock<ChatIntegrationRegistry>(),
-			mock<SlackAppSetupService>(),
-			mock<AgentTaskService>(),
-			mock<AgentKnowledgeService>(),
-		);
-
-		await expect(
-			controller.connectIntegration(
+		const personalisation = { icon: 'bot', gradient: { from: '#000000', to: '#ffffff' } };
+		const res = mock<Response>();
+		agentsService.findByProjectIdPaginated.mockResolvedValue({
+			count: 1,
+			data: [
 				{
-					params: { projectId: 'project-1' },
-					user: { id: 'user-1' },
-					body: { type: 'slack', credentialId: 'cred-outside-project' },
-				} as never,
-				undefined as never,
-				'agent-1',
-			),
-		).rejects.toThrow(NotFoundError);
-
-		expect(credentialsService.getCredentialsAUserCanUseInAWorkflow).toHaveBeenCalledWith(
-			{ id: 'user-1' },
-			{ projectId: 'project-1' },
-		);
-		expect(chatIntegrationService.connect).not.toHaveBeenCalled();
-	});
-
-	it('requires Telegram settings when connecting Telegram', async () => {
-		const { controller, chatIntegrationService } = makeController();
-
-		await expect(
-			controller.connectIntegration(
-				{
-					params: { projectId: 'project-1' },
-					user: { id: 'user-1' },
-					body: { type: 'telegram', credentialId: 'cred-telegram' },
-				} as never,
-				undefined as never,
-				'agent-1',
-			),
-		).rejects.toThrow(BadRequestError);
-
-		expect(chatIntegrationService.connect).not.toHaveBeenCalled();
-	});
-
-	it('rejects credentials whose type is not supported by the chat integration', async () => {
-		const credentialsService = mock<CredentialsService>();
-		credentialsService.getCredentialsAUserCanUseInAWorkflow.mockResolvedValue([
-			{
-				id: 'cred-oauth',
-				name: 'Slack OAuth',
-				type: 'slackOAuth2Api',
-				createdAt: '2024-01-01T00:00:00.000Z',
-				updatedAt: '2024-01-01T00:00:00.000Z',
-				scopes: [],
-				isManaged: false,
-				isGlobal: false,
-				isResolvable: true,
-				currentUserHasAccess: true,
-				homeProject: null,
-				sharedWithProjects: [],
-			},
-		]);
-
-		const agentRepository = mock<AgentRepository>();
-		agentRepository.findByIdAndProjectId.mockResolvedValue({
-			id: 'agent-1',
-			projectId: 'project-1',
-			activeVersionId: 'v1',
-			activeVersion: {},
-			integrations: [],
-		} as never);
-
-		const chatIntegrationService = mock<ChatIntegrationService>();
-		const chatIntegrationRegistry = mock<ChatIntegrationRegistry>();
-		chatIntegrationRegistry.require.mockReturnValue({
-			type: 'slack',
-			credentialTypes: ['slackApi'],
-		} as never);
-
-		const { controller } = makeController({
-			credentialsService,
-			chatIntegrationService,
-			agentRepository,
-			chatIntegrationRegistry,
-		});
-
-		await expect(
-			controller.connectIntegration(
-				{
-					params: { projectId: 'project-1' },
-					user: { id: 'user-1' },
-					body: { type: 'slack', credentialId: 'cred-oauth' },
-				} as never,
-				undefined as never,
-				'agent-1',
-			),
-		).rejects.toThrow(BadRequestError);
-
-		expect(chatIntegrationService.connect).not.toHaveBeenCalled();
-	});
-
-	it('persists and broadcasts Telegram settings on connect', async () => {
-		const credentialsService = mock<CredentialsService>();
-		credentialsService.getCredentialsAUserCanUseInAWorkflow.mockResolvedValue([
-			{
-				id: 'cred-telegram',
-				name: 'Telegram Bot',
-				type: 'telegramApi',
-				createdAt: '2024-01-01T00:00:00.000Z',
-				updatedAt: '2024-01-01T00:00:00.000Z',
-				scopes: [],
-				isManaged: false,
-				isGlobal: false,
-				isResolvable: true,
-				currentUserHasAccess: true,
-				homeProject: null,
-				sharedWithProjects: [],
-			},
-		]);
-
-		const agentRepository = mock<AgentRepository>();
-		const agent = {
-			id: 'agent-1',
-			projectId: 'project-1',
-			activeVersionId: 'v1',
-			activeVersion: {},
-			integrations: [],
-		};
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent as never);
-
-		const chatIntegrationService = mock<ChatIntegrationService>();
-		const agentsService = mock<AgentsService>();
-		const { controller } = makeController({
-			agentsService,
-			credentialsService,
-			chatIntegrationService,
-			agentRepository,
-		});
-		const settings = {
-			accessMode: 'private' as const,
-			allowedUsers: ['123'],
-		};
-
-		await expect(
-			controller.connectIntegration(
-				{
-					params: { projectId: 'project-1' },
-					user: { id: 'user-1' },
-					body: {
-						type: 'telegram',
-						credentialId: 'cred-telegram',
-						settings,
-					},
-				} as never,
-				undefined as never,
-				'agent-1',
-			),
-		).resolves.toEqual({ status: 'connected' });
-
-		expect(chatIntegrationService.connect).toHaveBeenCalledWith(
-			'agent-1',
-			{
-				type: 'telegram',
-				credentialId: 'cred-telegram',
-				settings,
-			},
-			'user-1',
-			'project-1',
-		);
-		expect(agentsService.saveCredentialIntegration).toHaveBeenCalledWith(agent, {
-			type: 'telegram',
-			credentialId: 'cred-telegram',
-			settings,
-		});
-	});
-
-	it('persists the integration before publishing when connecting an unpublished agent', async () => {
-		const credentialsService = mock<CredentialsService>();
-		credentialsService.getCredentialsAUserCanUseInAWorkflow.mockResolvedValue([
-			{
-				id: 'cred-slack',
-				name: 'Slack Bot',
-				type: 'slackApi',
-				createdAt: '2024-01-01T00:00:00.000Z',
-				updatedAt: '2024-01-01T00:00:00.000Z',
-				scopes: [],
-				isManaged: false,
-				isGlobal: false,
-				isResolvable: true,
-				currentUserHasAccess: true,
-				homeProject: null,
-				sharedWithProjects: [],
-			},
-		]);
-
-		const agentRepository = mock<AgentRepository>();
-		const agent = {
-			id: 'agent-1',
-			projectId: 'project-1',
-			publishedVersion: null,
-			integrations: [],
-		};
-		const savedAgent = {
-			...agent,
-			integrations: [{ type: 'slack', credentialId: 'cred-slack' }],
-		};
-		const publishedAgent = {
-			...savedAgent,
-			publishedVersion: {},
-		};
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent as never);
-
-		const agentsService = mock<AgentsService>();
-		agentsService.saveCredentialIntegration.mockResolvedValue(savedAgent as never);
-		agentsService.publishAgent.mockResolvedValue(publishedAgent as never);
-		agentsService.validateAgentIsRunnable.mockResolvedValue({ missing: [] } as never);
-		const chatIntegrationService = mock<ChatIntegrationService>();
-		chatIntegrationService.connect.mockResolvedValue(undefined);
-		chatIntegrationService.broadcastIntegrationChange.mockResolvedValue(undefined);
-		const { controller } = makeController({
-			agentsService,
-			credentialsService,
-			chatIntegrationService,
-			agentRepository,
-		});
-
-		await expect(
-			controller.connectIntegration(
-				{
-					params: { projectId: 'project-1' },
-					user: { id: 'user-1' },
-					body: { type: 'slack', credentialId: 'cred-slack' },
-				} as never,
-				undefined as never,
-				'agent-1',
-			),
-		).resolves.toMatchObject({
-			status: 'connected',
-			agent: {
-				id: 'agent-1',
-				publishedVersion: {},
-				isRunnable: true,
-			},
-		});
-
-		const integration = { type: 'slack', credentialId: 'cred-slack' };
-		expect(agentsService.saveCredentialIntegration).toHaveBeenCalledWith(agent, integration, {
-			broadcast: false,
-		});
-		expect(agentsService.publishAgent).toHaveBeenCalledWith(
-			'agent-1',
-			'project-1',
-			{ id: 'user-1' },
-			undefined,
-			{ syncIntegrations: false },
-		);
-		expect(chatIntegrationService.connect).toHaveBeenCalledWith(
-			'agent-1',
-			integration,
-			'user-1',
-			'project-1',
-		);
-		expect(chatIntegrationService.broadcastIntegrationChange).toHaveBeenCalledWith(
-			'agent-1',
-			integration,
-			'connect',
-		);
-		expect(agentsService.saveCredentialIntegration.mock.invocationCallOrder[0]).toBeLessThan(
-			agentsService.publishAgent.mock.invocationCallOrder[0],
-		);
-		expect(agentsService.publishAgent.mock.invocationCallOrder[0]).toBeLessThan(
-			chatIntegrationService.connect.mock.invocationCallOrder[0],
-		);
-		expect(chatIntegrationService.connect.mock.invocationCallOrder[0]).toBeLessThan(
-			chatIntegrationService.broadcastIntegrationChange.mock.invocationCallOrder[0],
-		);
-	});
-
-	it('does not report an unpublished agent integration as connected when live connect fails', async () => {
-		const credentialsService = mock<CredentialsService>();
-		credentialsService.getCredentialsAUserCanUseInAWorkflow.mockResolvedValue([
-			{
-				id: 'cred-slack',
-				name: 'Slack Bot',
-				type: 'slackApi',
-				createdAt: '2024-01-01T00:00:00.000Z',
-				updatedAt: '2024-01-01T00:00:00.000Z',
-				scopes: [],
-				isManaged: false,
-				isGlobal: false,
-				isResolvable: true,
-				currentUserHasAccess: true,
-				homeProject: null,
-				sharedWithProjects: [],
-			},
-		]);
-
-		const agentRepository = mock<AgentRepository>();
-		const agent = {
-			id: 'agent-1',
-			projectId: 'project-1',
-			publishedVersion: null,
-			integrations: [],
-		};
-		const savedAgent = {
-			...agent,
-			integrations: [{ type: 'slack', credentialId: 'cred-slack' }],
-		};
-		const publishedAgent = {
-			...savedAgent,
-			publishedVersion: {},
-		};
-		agentRepository.findByIdAndProjectId.mockResolvedValue(agent as never);
-
-		const agentsService = mock<AgentsService>();
-		agentsService.saveCredentialIntegration.mockResolvedValue(savedAgent as never);
-		agentsService.publishAgent.mockResolvedValue(publishedAgent as never);
-		const chatIntegrationService = mock<ChatIntegrationService>();
-		chatIntegrationService.connect.mockRejectedValue(new Error('Slack connect failed'));
-		const { controller } = makeController({
-			agentsService,
-			credentialsService,
-			chatIntegrationService,
-			agentRepository,
-		});
-
-		await expect(
-			controller.connectIntegration(
-				{
-					params: { projectId: 'project-1' },
-					user: { id: 'user-1' },
-					body: { type: 'slack', credentialId: 'cred-slack' },
-				} as never,
-				undefined as never,
-				'agent-1',
-			),
-		).rejects.toThrow('Slack connect failed');
-
-		expect(chatIntegrationService.broadcastIntegrationChange).not.toHaveBeenCalled();
-	});
-
-	it('returns Telegram integrations from the persisted agent entry even when the live bridge is empty', async () => {
-		const settings = {
-			accessMode: 'private' as const,
-			allowedUsers: ['123'],
-		};
-		const agentRepository = mock<AgentRepository>();
-		agentRepository.findByIdAndProjectId.mockResolvedValue({
-			id: 'agent-1',
-			projectId: 'project-1',
-			integrations: [
-				{
-					type: 'telegram',
-					credentialId: 'cred-telegram',
-					settings,
+					id: 'agent-1',
+					name: 'Support',
+					projectId: 'project-1',
+					schema: { name: 'Support', personalisation },
+					createdAt: new Date('2026-01-01T00:00:00.000Z'),
+					updatedAt: new Date('2026-01-02T00:00:00.000Z'),
 				},
 			],
 		} as never);
 
-		// In-memory chat-service map is transiently empty (boot / reconnect /
-		// leader-takeover race). Status must still surface the integration
-		// from the persisted entry, otherwise the FE trigger chip flickers.
-		const chatIntegrationService = mock<ChatIntegrationService>();
-		chatIntegrationService.getStatus.mockReturnValue({
-			status: 'disconnected',
-			connections: 0,
-			integrations: [],
-		});
+		await controller.list(req, res, { skip: 0, take: 10 } as never);
 
-		const { controller } = makeController({
-			agentRepository,
-			chatIntegrationService,
-		});
-
-		await expect(
-			controller.integrationStatus(
-				{ params: { projectId: 'project-1' } } as never,
-				undefined as never,
-				'agent-1',
-			),
-		).resolves.toEqual({
-			status: 'connected',
-			integrations: [
-				{
-					type: 'telegram',
-					credentialId: 'cred-telegram',
-					settings,
-				},
+		expect(res.json).toHaveBeenCalledWith({
+			count: 1,
+			data: [
+				expect.objectContaining({
+					id: 'agent-1',
+					name: 'Support',
+					hasConfig: true,
+					personalisation,
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-02T00:00:00.000Z',
+				}),
 			],
 		});
-	});
-
-	it('starts Slack app setup with the temporary app configuration token', async () => {
-		const slackAppSetupService = mock<SlackAppSetupService>();
-		slackAppSetupService.createApp.mockResolvedValue({
-			appId: 'A123',
-			installUrl: 'https://slack.com/oauth/v2/authorize?state=setup-state',
-		});
-		const { controller } = makeController({ slackAppSetupService });
-
-		await expect(
-			controller.createSlackApp(
-				{
-					params: { projectId: 'project-1' },
-					user: { id: 'user-1' },
-				} as never,
-				undefined as never,
-				'agent-1',
-				{ appConfigurationToken: 'xoxe-config' },
-			),
-		).resolves.toEqual({
-			appId: 'A123',
-			installUrl: 'https://slack.com/oauth/v2/authorize?state=setup-state',
-		});
-
-		expect(slackAppSetupService.createApp).toHaveBeenCalledWith({
-			projectId: 'project-1',
-			agentId: 'agent-1',
-			appConfigurationToken: 'xoxe-config',
-			user: { id: 'user-1' },
-		});
-	});
-
-	it('returns the manual Slack app manifest', async () => {
-		const slackAppSetupService = mock<SlackAppSetupService>();
-		slackAppSetupService.getManualManifest.mockResolvedValue({
-			manifest: {
-				display_information: { name: 'Support Agent' },
-				features: {
-					app_home: {
-						home_tab_enabled: true,
-						messages_tab_enabled: true,
-						messages_tab_read_only_enabled: false,
-					},
-					bot_user: {
-						display_name: 'Support Agent',
-						always_online: true,
-					},
-				},
-				oauth_config: {
-					scopes: { bot: ['chat:write'] },
-				},
-				settings: {
-					event_subscriptions: {
-						request_url:
-							'https://hooks.example/rest/projects/project-1/agents/v2/agent-1/webhooks/slack',
-						bot_events: ['app_mention'],
-					},
-					interactivity: {
-						is_enabled: true,
-						request_url:
-							'https://hooks.example/rest/projects/project-1/agents/v2/agent-1/webhooks/slack',
-					},
-					org_deploy_enabled: false,
-					socket_mode_enabled: false,
-					token_rotation_enabled: false,
-				},
-			},
-		});
-		const { controller } = makeController({ slackAppSetupService });
-
-		await expect(
-			controller.getSlackAppManifest(
-				{ params: { projectId: 'project-1' } } as never,
-				undefined as never,
-				'agent-1',
-			),
-		).resolves.toEqual({
-			manifest: expect.objectContaining({
-				display_information: { name: 'Support Agent' },
-				oauth_config: {
-					scopes: { bot: ['chat:write'] },
-				},
-			}),
-		});
-
-		expect(slackAppSetupService.getManualManifest).toHaveBeenCalledWith({
-			projectId: 'project-1',
-			agentId: 'agent-1',
-		});
-	});
-
-	it('completes Slack app setup from the OAuth callback and renders the success template', async () => {
-		const slackAppSetupService = mock<SlackAppSetupService>();
-		const { controller } = makeController({ slackAppSetupService });
-		const res = { render: jest.fn() };
-
-		await controller.handleSlackAppOAuthCallback(
-			{
-				params: { projectId: 'project-1' },
-				query: { code: 'slack-code', state: 'setup-state' },
-			} as never,
-			res as never,
-			'agent-1',
-		);
-
-		expect(slackAppSetupService.completeInstall).toHaveBeenCalledWith({
-			projectId: 'project-1',
-			agentId: 'agent-1',
-			code: 'slack-code',
-			state: 'setup-state',
-		});
-		expect(res.render).toHaveBeenCalledWith('oauth-callback');
-	});
-
-	it('renders the Slack OAuth error callback when Slack denies setup', async () => {
-		const slackAppSetupService = mock<SlackAppSetupService>();
-		const { controller } = makeController({ slackAppSetupService });
-		const res = { render: jest.fn() };
-
-		await controller.handleSlackAppOAuthCallback(
-			{
-				params: { projectId: 'project-1' },
-				query: { error: 'access_denied', error_description: 'User denied install' },
-			} as never,
-			res as never,
-			'agent-1',
-		);
-
-		expect(slackAppSetupService.completeInstall).not.toHaveBeenCalled();
-		expect(res.render).toHaveBeenCalledWith('oauth-error-callback', {
-			error: {
-				message: 'access_denied',
-				reason: 'User denied install',
-			},
-		});
+		expect(res.json.mock.calls[0]?.[0].data[0]).not.toHaveProperty('config');
+		expect(res.json.mock.calls[0]?.[0].data[0]).not.toHaveProperty('schema');
 	});
 });
 
 describe('AgentsController agent resource', () => {
 	it('adds runnable state to the single-agent response', async () => {
-		const agentsService = mock<AgentsService>();
+		const agentsService =
+			mock<Pick<AgentsService, 'findById' | 'findByProjectId' | 'findByProjectIdPaginated'>>();
+		const agentPublishService = mock<AgentPublishService>();
+		const agentValidationService = mock<AgentValidationService>();
+		const triage = {
+			name: 'Triage',
+			description: 'Triage requests',
+			instructions: 'Route each request.',
+		};
 		agentsService.findById.mockResolvedValue({
 			id: 'agent-1',
 			projectId: 'project-1',
+			schema: {
+				name: 'Agent',
+				model: '',
+				instructions: '',
+				skills: [{ type: 'skill', id: 'triage' }],
+			},
 		} as never);
-		agentsService.validateAgentIsRunnable.mockResolvedValue({ missing: [] });
+		agentValidationService.validateLoadedAgentConfiguration.mockResolvedValue({
+			status: 'valid',
+			issues: [],
+		});
+		agentPublishService.hasPublishHistory.mockResolvedValue(false);
 
-		const controller = new AgentsController(
-			agentsService,
-			mock<AgentsBuilderService>(),
-			mock<CredentialsService>(),
-			mock<ChatIntegrationService>(),
-			mock<AgentRepository>(),
-			mock<AgentExecutionService>(),
-			mock<ChatIntegrationRegistry>(),
-			mock<SlackAppSetupService>(),
-			mock<AgentTaskService>(),
-			mock<AgentKnowledgeService>(),
-		);
+		const { controller } = makeController({
+			agentsService: agentsService as never,
+			agentPublishService,
+			agentValidationService,
+			skillRefs: createAgentSkillRefsService({ triage }),
+		});
 
 		const result = await controller.get(
 			{
@@ -965,35 +455,44 @@ describe('AgentsController agent resource', () => {
 				isRunnable: true,
 			}),
 		);
-		expect(agentsService.validateAgentIsRunnable).toHaveBeenCalledWith(
-			'agent-1',
+		// The skill bodies come from the skills module, not from the agent row.
+		expect(result.skills).toEqual({ triage });
+		expect(result.skillHashes.triage).toMatch(/^[a-f0-9]{64}$/);
+		expect(result).not.toHaveProperty('schema');
+		expect(result.config).toEqual(
+			expect.objectContaining({
+				name: 'Agent',
+				skills: [{ type: 'skill', id: 'triage' }],
+			}),
+		);
+		expect(agentValidationService.validateLoadedAgentConfiguration).toHaveBeenCalledWith(
+			expect.objectContaining({ id: 'agent-1' }),
 			'project-1',
 			expect.any(AgentsCredentialProvider),
+			'runtime',
 		);
 	});
 
 	it('marks the single-agent response as not runnable when validation reports missing fields', async () => {
-		const agentsService = mock<AgentsService>();
+		const agentsService =
+			mock<Pick<AgentsService, 'findById' | 'findByProjectId' | 'findByProjectIdPaginated'>>();
+		const agentPublishService = mock<AgentPublishService>();
+		const agentValidationService = mock<AgentValidationService>();
 		agentsService.findById.mockResolvedValue({
 			id: 'agent-1',
 			projectId: 'project-1',
 		} as never);
-		agentsService.validateAgentIsRunnable.mockResolvedValue({
-			missing: ['credential'],
+		agentValidationService.validateLoadedAgentConfiguration.mockResolvedValue({
+			status: 'invalid',
+			issues: [{ code: 'missing_credential', path: 'credential', capability: { kind: 'agent' } }],
 		});
+		agentPublishService.hasPublishHistory.mockResolvedValue(false);
 
-		const controller = new AgentsController(
-			agentsService,
-			mock<AgentsBuilderService>(),
-			mock<CredentialsService>(),
-			mock<ChatIntegrationService>(),
-			mock<AgentRepository>(),
-			mock<AgentExecutionService>(),
-			mock<ChatIntegrationRegistry>(),
-			mock<SlackAppSetupService>(),
-			mock<AgentTaskService>(),
-			mock<AgentKnowledgeService>(),
-		);
+		const { controller } = makeController({
+			agentsService: agentsService as never,
+			agentPublishService,
+			agentValidationService,
+		});
 
 		const result = await controller.get(
 			{
@@ -1011,75 +510,149 @@ describe('AgentsController agent resource', () => {
 			}),
 		);
 	});
-});
 
-describe('AgentsController chat message history', () => {
-	function makeController() {
-		const agentsService = mock<AgentsService>();
-		const controller = new AgentsController(
-			agentsService,
-			mock<AgentsBuilderService>(),
-			mock<CredentialsService>(),
-			mock<ChatIntegrationService>(),
-			mock<AgentRepository>(),
-			mock<AgentExecutionService>(),
-			mock<ChatIntegrationRegistry>(),
-			mock<SlackAppSetupService>(),
-			mock<AgentTaskService>(),
-			mock<AgentKnowledgeService>(),
+	it('saves a GET body through the agent resource and returns the allowlisted agent', async () => {
+		const agentsService = mock<Pick<AgentsService, 'findById'>>();
+		const agentConfigService = mock<AgentConfigService>();
+		const saved = {
+			id: 'agent-1',
+			name: 'Support',
+			projectId: 'project-1',
+			schema: { name: 'Support', model: '', instructions: 'Help users' },
+			integrations: [],
+			tools: {},
+			createdAt: new Date('2026-01-01T00:00:00.000Z'),
+			updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+		};
+		agentsService.findById.mockResolvedValue(saved as never);
+		agentConfigService.updateConfig.mockResolvedValue({
+			config: saved.schema,
+			configHash: 'hash',
+			versionId: 'v2',
+			updatedAt: saved.updatedAt,
+		} as never);
+		const { controller, agentWriteLockService, agentValidationService } = makeController({
+			agentsService: agentsService as never,
+			agentConfigService,
+		});
+		agentValidationService.validateLoadedAgentConfiguration.mockResolvedValue({
+			status: 'valid',
+			issues: [],
+		});
+
+		const result = await controller.update(
+			{
+				params: { projectId: 'project-1' },
+				user: { id: 'user-1' },
+				headers: { 'push-ref': 'tab-1' },
+			} as never,
+			mock<Response>(),
+			'agent-1',
+			{ config: saved.schema, baseConfigHash: 'previous-hash' } as never,
 		);
 
-		return { controller, agentsService };
-	}
-
-	it('returns conversation history from the agents service', async () => {
-		const { controller, agentsService } = makeController();
-		agentsService.findById.mockResolvedValue({ id: 'agent-1' } as never);
-		agentsService.getConversationHistory.mockResolvedValue([
-			{
-				id: 'execution-1:user',
-				role: 'user',
-				content: [{ type: 'text', text: 'Hello' }],
-			},
-			{
-				id: 'execution-1:assistant',
-				role: 'assistant',
-				content: [{ type: 'text', text: 'Hi there' }],
-			},
-		]);
-
-		const messages = await controller.getChatMessages({
-			params: { projectId: 'project-1', agentId: 'agent-1', threadId: 'thread-1' },
-		} as never);
-
-		expect(messages).toEqual([
-			{
-				id: 'execution-1:user',
-				role: 'user',
-				content: [{ type: 'text', text: 'Hello' }],
-			},
-			{
-				id: 'execution-1:assistant',
-				role: 'assistant',
-				content: [{ type: 'text', text: 'Hi there' }],
-			},
-		]);
-		expect(agentsService.getConversationHistory).toHaveBeenCalledWith({
-			threadId: 'thread-1',
-			projectId: 'project-1',
-			agentId: 'agent-1',
-		});
+		expect(agentWriteLockService.validateAgentWriteLock).toHaveBeenCalledWith(
+			'user-1',
+			'tab-1',
+			'project-1',
+			'agent-1',
+			'update',
+		);
+		expect(agentConfigService.updateConfig).toHaveBeenCalledWith(
+			'agent-1',
+			'project-1',
+			saved.schema,
+			{ id: 'user-1' },
+			expect.objectContaining({ baseConfigHash: 'previous-hash', modifiedBy: 'user' }),
+		);
+		expect(result).toEqual(
+			expect.objectContaining({
+				id: 'agent-1',
+				name: 'Support',
+				configHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+			}),
+		);
+		expect(result).not.toHaveProperty('schema');
 	});
 
-	it('rejects missing conversation history', async () => {
-		const { controller, agentsService } = makeController();
-		agentsService.findById.mockResolvedValue({ id: 'agent-1' } as never);
-		agentsService.getConversationHistory.mockResolvedValue(null);
+	it('uses configHash from a GET body when baseConfigHash is absent', async () => {
+		const agentsService = mock<Pick<AgentsService, 'findById'>>();
+		const agentConfigService = mock<AgentConfigService>();
+		agentsService.findById.mockResolvedValue({
+			id: 'agent-1',
+			projectId: 'project-1',
+			schema: null,
+		} as never);
+		const { controller, agentValidationService } = makeController({
+			agentsService: agentsService as never,
+			agentConfigService,
+		});
+		agentValidationService.validateLoadedAgentConfiguration.mockResolvedValue({
+			status: 'valid',
+			issues: [],
+		});
+
+		await controller.update(
+			{ params: { projectId: 'project-1' }, user: { id: 'user-1' }, headers: {} } as never,
+			mock<Response>(),
+			'agent-1',
+			UpdateAgentDto.parse({
+				config: { name: 'Support' },
+				configHash: 'from-get',
+				id: 'agent-1',
+				name: 'Support',
+			}) as never,
+		);
+
+		expect(agentConfigService.updateConfig).toHaveBeenCalledWith(
+			'agent-1',
+			'project-1',
+			{ name: 'Support' },
+			{ id: 'user-1' },
+			expect.objectContaining({ baseConfigHash: 'from-get' }),
+		);
+	});
+
+	it('rejects an update when another tab holds the write lock', async () => {
+		const agentConfigService = mock<AgentConfigService>();
+		const agentWriteLockService = mock<AgentWriteLockService>();
+		agentWriteLockService.validateAgentWriteLock.mockRejectedValue(new LockedError('locked'));
+		const { controller } = makeController({ agentConfigService, agentWriteLockService });
 
 		await expect(
-			controller.getChatMessages({
-				params: { projectId: 'project-1', agentId: 'agent-1', threadId: 'thread-1' },
-			} as never),
-		).rejects.toThrow(NotFoundError);
+			controller.update(
+				{
+					params: { projectId: 'project-1' },
+					user: { id: 'user-1' },
+					headers: { 'push-ref': 'tab-2' },
+				} as never,
+				mock<Response>(),
+				'agent-1',
+				{ config: { name: 'Support' }, baseConfigHash: 'hash' } as never,
+			),
+		).rejects.toBeInstanceOf(LockedError);
+		expect(agentConfigService.updateConfig).not.toHaveBeenCalled();
+	});
+});
+
+describe('AgentsController.getWriteLock', () => {
+	it('passes the agent id from the route param, not the response object', async () => {
+		const agentWriteLockService = mock<AgentWriteLockService>();
+		const lock = { clientId: 'tab-1', userId: 'user-1' };
+		agentWriteLockService.getAgentWriteLock.mockResolvedValue(lock);
+		const { controller } = makeController({ agentWriteLockService });
+
+		// The registry calls handlers as (req, res, ...decoratedArgs).
+		const result = await controller.getWriteLock(
+			{
+				params: { projectId: 'project-1', agentId: 'agent-1' },
+				user: { id: 'user-1' },
+			} as never,
+			mock<Response>(),
+			'agent-1',
+		);
+
+		expect(agentWriteLockService.getAgentWriteLock).toHaveBeenCalledWith('project-1', 'agent-1');
+		expect(result).toEqual(lock);
 	});
 });

@@ -1,191 +1,164 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { N8nButton, N8nIcon, N8nOption, N8nSelect, N8nText } from '@n8n/design-system';
+import { N8nButton, N8nDialogBody, N8nDialogFooter, N8nIcon } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
-import type { McpServerConnectionItem, McpToolInclusionMode, McpToolSettings } from './types';
+import { DEFAULT_INSTANCE_AI_PERMISSIONS, type McpToolPermissions } from '@n8n/api-types';
 
-const props = defineProps<{
-	item: McpServerConnectionItem;
-}>();
+import McpConnectionStatusCallout from './McpConnectionStatusCallout.vue';
+import McpDetailBody from './McpDetailBody.vue';
+import McpToolPermissionsEditor from './McpToolPermissionsEditor.vue';
+import type { McpServerConnectionItem, McpToolSettings } from './types';
+
+const props = withDefaults(
+	defineProps<{
+		item: McpServerConnectionItem;
+		actor?: 'assistant' | 'agent';
+		supportsApproval?: boolean;
+		showRemove?: boolean;
+		saveLabel?: string;
+	}>(),
+	{
+		actor: 'assistant',
+		supportsApproval: true,
+		showRemove: true,
+	},
+);
 
 const emit = defineEmits<{
 	save: [settings: McpToolSettings];
 	disconnect: [];
+	cancel: [];
+	reconnect: [];
+	retry: [];
 }>();
 
+const FORM_ID = 'mcp-tool-settings-form';
+
 const i18n = useI18n();
+const isConnectionUnhealthy = computed(() => props.item.status === 'disconnected');
+const arePermissionsDisabled = computed(() => props.item.status !== 'connected');
 
 const initialSettings = (): McpToolSettings =>
 	props.item.settings ?? {
-		inclusionMode: 'all',
-		selectedTools: [],
-		excludedTools: [],
+		categories: {
+			read: DEFAULT_INSTANCE_AI_PERMISSIONS.mcpRead,
+			write: DEFAULT_INSTANCE_AI_PERMISSIONS.mcpWrite,
+		},
 	};
 
-const inclusionMode = ref<McpToolInclusionMode>(initialSettings().inclusionMode);
-const selectedTools = ref<string[]>([...initialSettings().selectedTools]);
-const excludedTools = ref<string[]>([...initialSettings().excludedTools]);
+const draftSettings = ref<McpToolSettings>(initialSettings());
+const draftPermissions = computed<McpToolPermissions>({
+	get: () => draftSettings.value,
+	set: (permissions) => {
+		draftSettings.value = {
+			...permissions,
+			...(draftSettings.value.connectionTimeoutMs === undefined
+				? {}
+				: { connectionTimeoutMs: draftSettings.value.connectionTimeoutMs }),
+		};
+	},
+});
+const hasSavedBefore = ref(false);
 
 watch(
 	() => props.item.id,
 	() => {
-		const next = initialSettings();
-		inclusionMode.value = next.inclusionMode;
-		selectedTools.value = [...next.selectedTools];
-		excludedTools.value = [...next.excludedTools];
+		hasSavedBefore.value = false;
+		draftSettings.value = initialSettings();
 	},
 );
 
-const inclusionOptions: Array<{ value: McpToolInclusionMode; label: string }> = [
-	{ value: 'all', label: i18n.baseText('tools.connection.settings.inclusion.all') },
-	{ value: 'selected', label: i18n.baseText('tools.connection.settings.inclusion.selected') },
-	{ value: 'except', label: i18n.baseText('tools.connection.settings.inclusion.except') },
-];
-
-const toolOptions = computed(() =>
-	props.item.availableTools.map((tool) => ({ value: tool.id, label: tool.name })),
-);
-
-const showIncludeList = computed(() => inclusionMode.value === 'selected');
-const showExcludeList = computed(() => inclusionMode.value === 'except');
+const hasChanges = computed(() => {
+	if (!hasSavedBefore.value) return true;
+	return JSON.stringify(draftSettings.value) !== JSON.stringify(initialSettings());
+});
 
 function handleSave() {
-	emit('save', {
-		inclusionMode: inclusionMode.value,
-		selectedTools: [...selectedTools.value],
-		excludedTools: [...excludedTools.value],
-	});
+	if (!hasChanges.value) return;
+	hasSavedBefore.value = true;
+	emit('save', draftSettings.value);
 }
 </script>
 
 <template>
-	<div :class="$style.container">
-		<div :class="$style.body">
-			<div :class="$style.field">
-				<N8nText :class="$style.fieldLabel" tag="label" size="small">
-					{{ i18n.baseText('tools.connection.settings.toolInclusion') }}
-				</N8nText>
-				<N8nSelect
-					v-model="inclusionMode"
-					size="medium"
-					data-test-id="tools-connection-settings-inclusion"
-				>
-					<N8nOption
-						v-for="opt in inclusionOptions"
-						:key="opt.value"
-						:value="opt.value"
-						:label="opt.label"
-					/>
-				</N8nSelect>
-			</div>
+	<div :class="$style.layout">
+		<N8nDialogBody>
+			<form :id="FORM_ID" @submit.prevent="handleSave">
+				<McpDetailBody :item="item" />
 
-			<div v-if="showIncludeList" :class="$style.field">
-				<N8nText :class="$style.fieldLabel" tag="label" size="small">
-					{{ i18n.baseText('tools.connection.settings.toolsToInclude') }}
-				</N8nText>
-				<N8nSelect
-					v-model="selectedTools"
-					multiple
-					filterable
-					size="medium"
-					:class="$style.multiSelect"
-					:placeholder="i18n.baseText('tools.connection.settings.toolsPlaceholder')"
-					data-test-id="tools-connection-settings-selected"
-				>
-					<N8nOption
-						v-for="opt in toolOptions"
-						:key="opt.value"
-						:value="opt.value"
-						:label="opt.label"
-					/>
-				</N8nSelect>
-			</div>
+				<McpConnectionStatusCallout
+					v-if="isConnectionUnhealthy"
+					:class="$style.failureCallout"
+					:failure-reason="item.connectionFailureReason"
+					@reconnect="emit('reconnect')"
+					@retry="emit('retry')"
+				/>
 
-			<div v-if="showExcludeList" :class="$style.field">
-				<N8nText :class="$style.fieldLabel" tag="label" size="small">
-					{{ i18n.baseText('tools.connection.settings.toolsToExclude') }}
-				</N8nText>
-				<N8nSelect
-					v-model="excludedTools"
-					multiple
-					filterable
-					size="medium"
-					:class="$style.multiSelect"
-					:placeholder="i18n.baseText('tools.connection.settings.toolsPlaceholder')"
-					data-test-id="tools-connection-settings-excluded"
-				>
-					<N8nOption
-						v-for="opt in toolOptions"
-						:key="opt.value"
-						:value="opt.value"
-						:label="opt.label"
-					/>
-				</N8nSelect>
-			</div>
-		</div>
+				<McpToolPermissionsEditor
+					v-model="draftPermissions"
+					:class="$style.permissions"
+					:actor="actor"
+					:available-tools="item.availableTools"
+					:server-title="item.title"
+					:status="item.status"
+					:exclude-permissions="supportsApproval ? [] : ['require_approval']"
+				/>
+			</form>
+		</N8nDialogBody>
 
-		<footer :class="$style.footer">
+		<N8nDialogFooter>
 			<N8nButton
-				variant="outline"
+				v-if="showRemove"
+				:class="$style.removeButton"
+				variant="destructive"
 				size="small"
-				data-test-id="tools-connection-settings-disconnect"
+				type="button"
+				data-test-id="tools-connection-settings-remove"
 				@click="emit('disconnect')"
 			>
 				<N8nIcon icon="trash-2" :size="14" :class="$style.footerIcon" />
-				<span>{{ i18n.baseText('tools.connection.settings.disconnect') }}</span>
+				<span>{{ i18n.baseText('tools.connection.settings.remove') }}</span>
 			</N8nButton>
+			<N8nButton
+				variant="outline"
+				size="small"
+				type="button"
+				:label="i18n.baseText('generic.cancel')"
+				data-test-id="tools-connection-settings-cancel"
+				@click="emit('cancel')"
+			/>
 			<N8nButton
 				variant="solid"
 				size="small"
-				:label="i18n.baseText('tools.connection.settings.save')"
+				type="submit"
+				:form="FORM_ID"
+				:label="saveLabel ?? i18n.baseText('generic.save')"
+				:disabled="!hasChanges || arePermissionsDisabled"
 				data-test-id="tools-connection-settings-save"
-				@click="handleSave"
 			/>
-		</footer>
+		</N8nDialogFooter>
 	</div>
 </template>
 
 <style lang="scss" module>
-.container {
+.layout {
 	display: flex;
-	flex-direction: column;
-	gap: var(--spacing--md);
-	min-height: 100%;
-}
-
-.body {
 	flex: 1 1 auto;
-	display: flex;
 	flex-direction: column;
-	gap: var(--spacing--sm);
+	min-height: 0;
+	height: 100%;
 }
 
-.field {
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing--4xs);
+.failureCallout {
+	margin-top: var(--spacing--sm);
 }
 
-.multiSelect {
-	// Cap the chip-container height so a long selection scrolls instead of
-	// blowing up the dialog vertically. Matches the tighter Figma rhythm.
-	:global(.el-select__wrapper) {
-		min-height: 40px;
-		max-height: 96px;
-		overflow-y: auto;
-	}
+.permissions {
+	margin-top: var(--spacing--xl);
 }
 
-.fieldLabel {
-	color: var(--color--text);
-}
-
-.footer {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	padding-top: var(--spacing--md);
-	border-top: 1px solid var(--color--foreground);
+.removeButton {
+	margin-right: auto;
 }
 
 .footerIcon {

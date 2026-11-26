@@ -1,10 +1,12 @@
 import type { DatabaseConfig } from '@n8n/config';
 import { QueryFailedError } from '@n8n/typeorm';
 import type { DataSource, EntityManager } from '@n8n/typeorm';
-import { OperationalError } from 'n8n-workflow';
+import { OperationalError } from '@n8n/errors';
 import { mock } from 'vitest-mock-extended';
 
+import { DbLockUnavailableError } from '../db-lock-unavailable.error';
 import { DbLockService } from '../db-lock.service';
+import { TypeOrmTransaction } from '../typeorm-transaction';
 
 describe('DbLockService', () => {
 	const mockTx = mock<EntityManager>();
@@ -33,7 +35,9 @@ describe('DbLockService', () => {
 
 			expect(result).toBe('result');
 			expect(mockTx.query).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock($1)', [1001]);
-			expect(fn).toHaveBeenCalledWith(mockTx);
+			expect(fn).toHaveBeenCalledWith(mockTx, {
+				trx: expect.any(TypeOrmTransaction) as TypeOrmTransaction,
+			});
 		});
 
 		it('should skip advisory lock on SQLite and still execute fn', async () => {
@@ -44,7 +48,9 @@ describe('DbLockService', () => {
 
 			expect(result).toBe('result');
 			expect(mockTx.query).not.toHaveBeenCalled();
-			expect(fn).toHaveBeenCalledWith(mockTx);
+			expect(fn).toHaveBeenCalledWith(mockTx, {
+				trx: expect.any(TypeOrmTransaction) as TypeOrmTransaction,
+			});
 		});
 
 		it('should set lock_timeout when timeoutMs is provided', async () => {
@@ -65,6 +71,72 @@ describe('DbLockService', () => {
 
 			expect(mockTx.query).not.toHaveBeenCalledWith(expect.stringContaining('lock_timeout'));
 			expect(mockTx.query).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock($1)', [1001]);
+		});
+
+		it('should disable all lock-killing timeouts when waitIndefinitely is set', async () => {
+			databaseConfig.type = 'postgresdb';
+			const fn = vi.fn().mockResolvedValue('result');
+
+			await service.withLock(1001, fn, { waitIndefinitely: true });
+
+			expect(mockTx.query).toHaveBeenCalledWith('SET LOCAL statement_timeout = 0');
+			expect(mockTx.query).toHaveBeenCalledWith('SET LOCAL lock_timeout = 0');
+			expect(mockTx.query).toHaveBeenCalledWith(
+				'SET LOCAL idle_in_transaction_session_timeout = 0',
+			);
+		});
+
+		it('should not touch statement timeouts without waitIndefinitely', async () => {
+			databaseConfig.type = 'postgresdb';
+			const fn = vi.fn().mockResolvedValue('result');
+
+			await service.withLock(1001, fn);
+			await service.withLock(1001, fn, { timeoutMs: 5000 });
+
+			expect(mockTx.query).not.toHaveBeenCalledWith(expect.stringContaining('statement_timeout'));
+			expect(mockTx.query).not.toHaveBeenCalledWith(
+				expect.stringContaining('idle_in_transaction_session_timeout'),
+			);
+		});
+
+		it('should reject combining timeoutMs and waitIndefinitely at compile time', async () => {
+			databaseConfig.type = 'postgresdb';
+			const fn = vi.fn().mockResolvedValue('result');
+
+			// @ts-expect-error timeoutMs and waitIndefinitely are mutually exclusive
+			await service.withLock(1001, fn, { timeoutMs: 5000, waitIndefinitely: true });
+		});
+
+		it('should use the two-key lock form when subKey is provided', async () => {
+			databaseConfig.type = 'postgresdb';
+			const fn = vi.fn().mockResolvedValue('result');
+
+			const result = await service.withLock(1005, fn, { subKey: -12345 });
+
+			expect(result).toBe('result');
+			expect(mockTx.query).toHaveBeenCalledWith(
+				'SELECT pg_advisory_xact_lock($1, $2)',
+				[1005, -12345],
+			);
+			expect(fn).toHaveBeenCalledWith(mockTx, {
+				trx: expect.any(TypeOrmTransaction) as TypeOrmTransaction,
+			});
+		});
+
+		it('should include both keys in the timeout error message when subKey is provided', async () => {
+			databaseConfig.type = 'postgresdb';
+			const fn = vi.fn();
+			const timeoutError = new QueryFailedError(
+				'SELECT pg_advisory_xact_lock($1, $2)',
+				[1005, -12345],
+				new Error('canceling statement due to lock timeout'),
+			);
+
+			mockTx.query.mockResolvedValueOnce(undefined).mockRejectedValueOnce(timeoutError);
+
+			await expect(service.withLock(1005, fn, { timeoutMs: 5000, subKey: -12345 })).rejects.toThrow(
+				/Timed out waiting for DbLock 1005:-12345 after 5000ms/,
+			);
 		});
 
 		it('should throw OperationalError when lock timeout is exceeded', async () => {
@@ -113,6 +185,45 @@ describe('DbLockService', () => {
 		});
 	});
 
+	describe('withLockContext', () => {
+		it('forwards the lock subkey', async () => {
+			databaseConfig.type = 'postgresdb';
+
+			await service.withLockContext(1001, async () => undefined, { subKey: -12345 });
+
+			expect(mockTx.query).toHaveBeenCalledWith(
+				'SELECT pg_advisory_xact_lock($1, $2)',
+				[1001, -12345],
+			);
+		});
+
+		it('provides an opaque context for the locked transaction', async () => {
+			databaseConfig.type = 'sqlite';
+			const fn = vi.fn().mockResolvedValue('result');
+
+			await expect(service.withLockContext(1001, fn)).resolves.toBe('result');
+			expect(fn).toHaveBeenCalledWith({
+				trx: expect.any(TypeOrmTransaction) as TypeOrmTransaction,
+			});
+		});
+	});
+
+	describe('tryWithLockContext', () => {
+		it('passes the active transaction in an operation context', async () => {
+			databaseConfig.type = 'postgresdb';
+			mockTx.query.mockResolvedValueOnce([{ pg_try_advisory_xact_lock: true }]);
+			const run = vi.fn(async () => 'result');
+
+			await expect(service.tryWithLockContext(1001, run, { subKey: 7 })).resolves.toBe('result');
+
+			expect(run).toHaveBeenCalledWith({ trx: expect.any(TypeOrmTransaction) });
+			expect(mockTx.query).toHaveBeenCalledWith(
+				'SELECT pg_try_advisory_xact_lock($1, $2)',
+				[1001, 7],
+			);
+		});
+	});
+
 	describe('tryWithLock', () => {
 		it('should execute fn when lock is acquired', async () => {
 			databaseConfig.type = 'postgresdb';
@@ -126,12 +237,13 @@ describe('DbLockService', () => {
 			expect(fn).toHaveBeenCalledWith(mockTx);
 		});
 
-		it('should throw OperationalError when lock is already held', async () => {
+		it('should throw DbLockUnavailableError when lock is already held', async () => {
 			databaseConfig.type = 'postgresdb';
 			const fn = vi.fn();
 			mockTx.query.mockResolvedValueOnce([{ pg_try_advisory_xact_lock: false }]);
 
 			const error = await service.tryWithLock(1001, fn).catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(DbLockUnavailableError);
 			expect(error).toBeInstanceOf(OperationalError);
 			expect((error as OperationalError).message).toMatch(
 				/DbLock 1001 is already held by another process/,
@@ -148,6 +260,62 @@ describe('DbLockService', () => {
 			expect(result).toBe('result');
 			expect(mockTx.query).not.toHaveBeenCalled();
 			expect(fn).toHaveBeenCalledWith(mockTx);
+		});
+
+		it('should use the two-key try-lock form when subKey is provided', async () => {
+			databaseConfig.type = 'postgresdb';
+			const fn = vi.fn().mockResolvedValue('result');
+			mockTx.query.mockResolvedValueOnce([{ pg_try_advisory_xact_lock: true }]);
+
+			const result = await service.tryWithLock(1006, fn, { subKey: -999 });
+
+			expect(result).toBe('result');
+			expect(mockTx.query).toHaveBeenCalledWith(
+				'SELECT pg_try_advisory_xact_lock($1, $2)',
+				[1006, -999],
+			);
+			expect(fn).toHaveBeenCalledWith(mockTx);
+		});
+
+		it('should include both keys in the already-held error when subKey is provided', async () => {
+			databaseConfig.type = 'postgresdb';
+			const fn = vi.fn();
+			mockTx.query.mockResolvedValueOnce([{ pg_try_advisory_xact_lock: false }]);
+
+			await expect(service.tryWithLock(1006, fn, { subKey: -999 })).rejects.toThrow(
+				/DbLock 1006:-999 is already held/,
+			);
+			expect(fn).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('tryWithLockContext', () => {
+		it('provides an opaque context for the locked transaction', async () => {
+			databaseConfig.type = 'postgresdb';
+			mockTx.query.mockResolvedValueOnce([{ pg_try_advisory_xact_lock: true }]);
+			const fn = vi.fn().mockResolvedValue('result');
+
+			const result = await service.tryWithLockContext(1001, fn, { subKey: 7 });
+
+			expect(result).toBe('result');
+			expect(mockTx.query).toHaveBeenCalledWith(
+				'SELECT pg_try_advisory_xact_lock($1, $2)',
+				[1001, 7],
+			);
+			expect(fn).toHaveBeenCalledWith({
+				trx: expect.any(TypeOrmTransaction) as TypeOrmTransaction,
+			});
+		});
+
+		it('throws DbLockUnavailableError without running fn when the lock is held', async () => {
+			databaseConfig.type = 'postgresdb';
+			mockTx.query.mockResolvedValueOnce([{ pg_try_advisory_xact_lock: false }]);
+			const fn = vi.fn();
+
+			await expect(service.tryWithLockContext(1001, fn)).rejects.toBeInstanceOf(
+				DbLockUnavailableError,
+			);
+			expect(fn).not.toHaveBeenCalled();
 		});
 	});
 
@@ -192,6 +360,61 @@ describe('DbLockService', () => {
 			expect(r1).toBe('first');
 			expect(r2).toBe('second');
 			expect(executionOrder).toEqual(['fn1-start', 'fn1-end', 'fn2-start']);
+		});
+
+		it('should scope the in-process mutex by subKey', async () => {
+			let resolveFirst!: () => void;
+			const firstBlocking = new Promise<void>((r) => {
+				resolveFirst = r;
+			});
+
+			const fn1 = vi.fn(async () => {
+				await firstBlocking;
+				return 'first';
+			});
+			const fn2 = vi.fn(async () => 'second');
+			const fn3 = vi.fn(async () => 'third');
+
+			const p1 = service.withLock(1001, fn1, { subKey: 1 });
+			// Different subKey — must not block
+			const p2 = service.withLock(1001, fn2, { subKey: 2 });
+			// Same subKey — must block until fn1 releases
+			const p3 = service.withLock(1001, fn3, { subKey: 1 });
+
+			await new Promise((r) => setImmediate(r));
+			expect(fn1).toHaveBeenCalled();
+			expect(fn2).toHaveBeenCalled();
+			expect(fn3).not.toHaveBeenCalled();
+
+			resolveFirst();
+			const results = await Promise.all([p1, p2, p3]);
+			expect(results).toEqual(['first', 'second', 'third']);
+		});
+
+		it('should scope tryWithLock by subKey (fail-fast per sub-scope)', async () => {
+			let resolveHold!: () => void;
+			const holding = new Promise<void>((r) => {
+				resolveHold = r;
+			});
+			const holder = vi.fn(async () => {
+				await holding;
+				return 'held';
+			});
+
+			// Hold subKey 1 via a blocking withLock.
+			const p1 = service.withLock(1006, holder, { subKey: 1 });
+			await new Promise((r) => setImmediate(r));
+			expect(holder).toHaveBeenCalled();
+
+			// Same subKey → tryWithLock can't acquire and fails fast.
+			await expect(service.tryWithLock(1006, vi.fn(), { subKey: 1 })).rejects.toThrow(
+				OperationalError,
+			);
+			// Different subKey → acquires immediately.
+			await expect(service.tryWithLock(1006, async () => 'ok', { subKey: 2 })).resolves.toBe('ok');
+
+			resolveHold();
+			await p1;
 		});
 
 		it('should not block different lockIds', async () => {
@@ -264,9 +487,9 @@ describe('DbLockService', () => {
 			// Wait for fn1 to start (lock is held)
 			await new Promise((r) => setImmediate(r));
 
-			await expect(service.tryWithLock(1001, fn2)).rejects.toThrow(
-				/DbLock 1001 is already held by another process/,
-			);
+			const error = await service.tryWithLock(1001, fn2).catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(DbLockUnavailableError);
+			expect((error as Error).message).toMatch(/DbLock 1001 is already held by another process/);
 			expect(fn2).not.toHaveBeenCalled();
 
 			resolveFirst();

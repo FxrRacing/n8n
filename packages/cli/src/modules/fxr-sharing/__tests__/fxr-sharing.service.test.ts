@@ -1,3 +1,4 @@
+import { Person } from '@n8n/db';
 import type {
 	Project,
 	ProjectRepository,
@@ -7,10 +8,9 @@ import type {
 	User,
 	UserRepository,
 } from '@n8n/db';
-import { mock } from 'jest-mock-extended';
+import { mock } from 'vitest-mock-extended';
 
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
+import { ForbiddenError, NotFoundError } from '@n8n/errors';
 
 import { FxrSharingService } from '../fxr-sharing.service';
 
@@ -26,6 +26,9 @@ describe('FxrSharingService', () => {
 		userRepository,
 	);
 
+	// `isPerson` only accepts real Person instances, so sharees are built from the entity.
+	const person = (fields: Partial<Person>) => Object.assign(new Person(), fields);
+
 	const ownerProject = mock<Project>({ id: 'p-owner', type: 'personal' });
 	const owner = mock<User>({ id: 'u-owner', role: { slug: 'global:member' } });
 	const instanceOwner = mock<User>({ id: 'u-root', role: { slug: 'global:owner' } });
@@ -35,7 +38,7 @@ describe('FxrSharingService', () => {
 		mock<SharedWorkflow>({ workflowId: 'wf1', projectId, role });
 
 	beforeEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 		sharedWorkflowRepository.getWorkflowOwningProject.mockResolvedValue(ownerProject);
 		projectRepository.getPersonalProjectForUserOrFail.mockImplementation(async (userId) =>
 			mock<Project>({ id: userId === 'u-owner' ? 'p-owner' : `p-${userId}` }),
@@ -46,7 +49,7 @@ describe('FxrSharingService', () => {
 				: mock<Project>({ id: userId === 'u-owner' ? 'p-owner' : `p-${userId}` }),
 		);
 		userRepository.findPersonalOwnerForProject.mockImplementation(async (projectId) =>
-			mock<User>({
+			person({
 				id: projectId.replace('p-', ''),
 				email: `${projectId}@fxr.test`,
 				firstName: 'F',
@@ -135,10 +138,10 @@ describe('FxrSharingService', () => {
 	describe('listCandidateUsers', () => {
 		it('excludes the caller, disabled and pending users', async () => {
 			userRepository.find.mockResolvedValue([
-				mock<User>({ id: 'u-owner', disabled: false, isPending: false }),
-				mock<User>({ id: 'u-a', email: 'a@fxr.test', disabled: false, isPending: false }),
-				mock<User>({ id: 'u-disabled', disabled: true, isPending: false }),
-				mock<User>({ id: 'u-pending', disabled: false, isPending: true }),
+				person({ id: 'u-owner', disabled: false, isPending: false }),
+				person({ id: 'u-a', email: 'a@fxr.test', disabled: false, isPending: false }),
+				person({ id: 'u-disabled', disabled: true, isPending: false }),
+				person({ id: 'u-pending', disabled: false, isPending: true }),
 			]);
 
 			const users = await service.listCandidateUsers(owner);

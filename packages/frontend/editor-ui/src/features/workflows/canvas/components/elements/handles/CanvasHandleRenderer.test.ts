@@ -2,8 +2,9 @@ import CanvasHandleRenderer from './CanvasHandleRenderer.vue';
 import { NodeConnectionTypes } from 'n8n-workflow';
 import { createComponentRenderer } from '@/__tests__/render';
 import { CanvasNodeHandleKey } from '@/app/constants';
-import { ref, type ComputedRef } from 'vue';
+import { defineComponent, ref, type ComputedRef } from 'vue';
 import {
+	CANVAS_NODE_GROUP_INPUT_HANDLE,
 	CanvasConnectionMode,
 	type CanvasConnectionPort,
 	type CanvasElementPortWithRenderData,
@@ -17,17 +18,18 @@ import {
 const renderNodeInputsMap = new Map<string, ComputedRef<CanvasConnectionPort[]>>();
 const renderNodeOutputsMap = new Map<string, ComputedRef<CanvasConnectionPort[]>>();
 
-vi.mock('@/features/workflows/canvas/canvas.utils', async (importOriginal) => ({
-	...(await importOriginal<typeof import('@/features/workflows/canvas/canvas.utils')>()),
-	injectCanvasRenderData: vi.fn(() => ({
-		value: {
-			nodeInputsByNodeId: renderNodeInputsMap,
-			nodeOutputsByNodeId: renderNodeOutputsMap,
-			pinnedDataByNodeName: {},
-			executionIssuesByNodeName: new Map(),
-		},
-	})),
-}));
+vi.mock('@/features/workflows/canvas/canvas.utils', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('@/features/workflows/canvas/canvas.utils')>();
+	return {
+		...actual,
+		injectCanvasRenderData: vi.fn(() => ({
+			value: actual.createEmptyCanvasRenderData({
+				nodeInputsByNodeId: renderNodeInputsMap,
+				nodeOutputsByNodeId: renderNodeOutputsMap,
+			}),
+		})),
+	};
+});
 
 const renderComponent = createComponentRenderer(CanvasHandleRenderer, {
 	global: {
@@ -38,9 +40,12 @@ const renderComponent = createComponentRenderer(CanvasHandleRenderer, {
 	},
 });
 
-const Handle = {
-	template: '<div><slot /></div>',
-};
+const Handle = defineComponent({
+	props: {
+		connectableEnd: Boolean,
+	},
+	template: '<div :data-connectable-end="connectableEnd"><slot /></div>',
+});
 
 describe('CanvasHandleRenderer', () => {
 	it('should render the main input handle correctly', async () => {
@@ -83,6 +88,36 @@ describe('CanvasHandleRenderer', () => {
 
 		expect(container.querySelector('.handle')).toBeInTheDocument();
 		expect(container.querySelector('.outputs.main')).toBeInTheDocument();
+		expect(container.querySelector('[data-connectable-end="false"]')).toBeInTheDocument();
+	});
+
+	it('allows a main output to receive a drag from an empty-group input', async () => {
+		const { container } = renderComponent({
+			props: {
+				mode: CanvasConnectionMode.Output,
+				type: NodeConnectionTypes.Main,
+				index: 0,
+				position: Position.Right,
+				offset: { right: '10px', bottom: '10px' } as CanvasElementPortWithRenderData['offset'],
+				label: 'Main Output',
+			},
+			global: {
+				provide: {
+					...createCanvasProvide({
+						connectingHandle: {
+							nodeId: 'anchor',
+							handleId: CANVAS_NODE_GROUP_INPUT_HANDLE,
+							handleType: 'target',
+							isEmptyGroupTargetStart: true,
+						},
+					}),
+					...createCanvasNodeProvide(),
+				},
+				stubs: { Handle },
+			},
+		});
+
+		expect(container.querySelector('[data-connectable-end="true"]')).toBeInTheDocument();
 	});
 
 	it('should render the non-main handle correctly', async () => {

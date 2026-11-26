@@ -1,4 +1,4 @@
-import { mockDeep } from 'jest-mock-extended';
+import { mockDeep } from 'vitest-mock-extended';
 import type {
 	ICredentialsDecrypted,
 	ICredentialTestFunctions,
@@ -8,13 +8,16 @@ import type {
 	IWebhookFunctions,
 } from 'n8n-workflow';
 
+import { requestPath } from 'n8n-workflow';
+
 import { BitbucketTrigger } from '../BitbucketTrigger.node';
 import * as GenericFunctions from '../GenericFunctions';
+import type { MockInstance } from 'vitest';
 
 describe('BitbucketTrigger', () => {
 	let bitbucketTrigger: BitbucketTrigger;
-	let bitbucketApiRequestSpy: jest.SpyInstance;
-	let bitbucketApiRequestAllItemsSpy: jest.SpyInstance;
+	let bitbucketApiRequestSpy: MockInstance;
+	let bitbucketApiRequestAllItemsSpy: MockInstance;
 
 	const mockNode: INode = {
 		id: 'test-node-id',
@@ -26,9 +29,9 @@ describe('BitbucketTrigger', () => {
 	};
 
 	beforeEach(() => {
-		jest.resetAllMocks();
-		bitbucketApiRequestSpy = jest.spyOn(GenericFunctions, 'bitbucketApiRequest');
-		bitbucketApiRequestAllItemsSpy = jest.spyOn(GenericFunctions, 'bitbucketApiRequestAllItems');
+		vi.resetAllMocks();
+		bitbucketApiRequestSpy = vi.spyOn(GenericFunctions, 'bitbucketApiRequest');
+		bitbucketApiRequestAllItemsSpy = vi.spyOn(GenericFunctions, 'bitbucketApiRequestAllItems');
 		bitbucketTrigger = new BitbucketTrigger();
 	});
 
@@ -52,6 +55,8 @@ describe('BitbucketTrigger', () => {
 
 			const mockResponse = {
 				username: 'testuser',
+				account_id: '{abc12345-1234-1234-1234-abc123456789}',
+				uuid: '{abc12345-1234-1234-1234-abc123456789}',
 				display_name: 'Test User',
 			};
 
@@ -79,6 +84,37 @@ describe('BitbucketTrigger', () => {
 			});
 		});
 
+		it('should return success for scoped API tokens that return account_id without username', async () => {
+			const mockCredentials: ICredentialsDecrypted = {
+				id: 'test-cred-id',
+				name: 'Test Bitbucket Credentials',
+				type: 'bitbucketApi',
+				data: {
+					username: 'testuser',
+					appPassword: 'testpassword',
+				},
+			};
+
+			// Scoped API tokens return account_id and uuid but no username field
+			const mockResponse = {
+				account_id: '{abc12345-1234-1234-1234-abc123456789}',
+				uuid: '{abc12345-1234-1234-1234-abc123456789}',
+				display_name: 'Test User',
+			};
+
+			mockCredentialTestFunctions.helpers.request.mockResolvedValue(mockResponse);
+
+			const result = await bitbucketTrigger.methods.credentialTest.bitbucketApiTest.call(
+				mockCredentialTestFunctions,
+				mockCredentials,
+			);
+
+			expect(result).toEqual({
+				status: 'OK',
+				message: 'Authentication successful!',
+			});
+		});
+
 		it('should return error for invalid credentials', async () => {
 			const mockCredentials: ICredentialsDecrypted = {
 				id: 'test-cred-id',
@@ -90,6 +126,7 @@ describe('BitbucketTrigger', () => {
 				},
 			};
 
+			// Invalid credentials return an error response with no account_id or uuid
 			const mockResponse = {
 				error: 'Invalid credentials',
 			};
@@ -163,7 +200,7 @@ describe('BitbucketTrigger', () => {
 				expect(bitbucketApiRequestAllItemsSpy).toHaveBeenCalledWith(
 					'values',
 					'GET',
-					'/hook_events/workspace',
+					requestPath`/hook_events/workspace`,
 				);
 
 				expect(result).toEqual([
@@ -215,7 +252,7 @@ describe('BitbucketTrigger', () => {
 				expect(bitbucketApiRequestAllItemsSpy).toHaveBeenCalledWith(
 					'values',
 					'GET',
-					'/hook_events/repository',
+					requestPath`/hook_events/repository`,
 				);
 
 				expect(result).toEqual([
@@ -256,7 +293,7 @@ describe('BitbucketTrigger', () => {
 				expect(bitbucketApiRequestAllItemsSpy).toHaveBeenCalledWith(
 					'values',
 					'GET',
-					'/repositories/test-workspace',
+					requestPath`/repositories/test-workspace`,
 				);
 
 				expect(result).toEqual([
@@ -300,7 +337,7 @@ describe('BitbucketTrigger', () => {
 				expect(bitbucketApiRequestAllItemsSpy).toHaveBeenCalledWith(
 					'values',
 					'GET',
-					'/user/workspaces',
+					requestPath`/user/workspaces`,
 				);
 
 				expect(result).toEqual([
@@ -357,7 +394,7 @@ describe('BitbucketTrigger', () => {
 
 				expect(bitbucketApiRequestSpy).toHaveBeenCalledWith(
 					'GET',
-					'/workspaces/test-workspace/hooks',
+					requestPath`/workspaces/test-workspace/hooks`,
 				);
 				expect(result).toBe(true);
 
@@ -391,7 +428,7 @@ describe('BitbucketTrigger', () => {
 
 				expect(bitbucketApiRequestSpy).toHaveBeenCalledWith(
 					'GET',
-					'/repositories/test-workspace/test-repo/hooks',
+					requestPath`/repositories/test-workspace/test-repo/hooks`,
 				);
 				expect(result).toBe(true);
 			});
@@ -468,7 +505,7 @@ describe('BitbucketTrigger', () => {
 
 				expect(bitbucketApiRequestSpy).toHaveBeenCalledWith(
 					'POST',
-					'/workspaces/test-workspace/hooks',
+					requestPath`/workspaces/test-workspace/hooks`,
 					{
 						description: 'n8n webhook',
 						url: 'https://test.n8n.io/webhook/test',
@@ -505,7 +542,7 @@ describe('BitbucketTrigger', () => {
 
 				expect(bitbucketApiRequestSpy).toHaveBeenCalledWith(
 					'POST',
-					'/repositories/test-workspace/test-repo/hooks',
+					requestPath`/repositories/test-workspace/test-repo/hooks`,
 					{
 						description: 'n8n webhook',
 						url: 'https://test.n8n.io/webhook/test',
@@ -535,7 +572,7 @@ describe('BitbucketTrigger', () => {
 
 				expect(bitbucketApiRequestSpy).toHaveBeenCalledWith(
 					'DELETE',
-					'/workspaces/test-workspace/hooks/12345678-1234-1234-1234-123456789012',
+					requestPath`/workspaces/test-workspace/hooks/12345678-1234-1234-1234-123456789012`,
 				);
 
 				expect(result).toBe(true);
@@ -559,7 +596,7 @@ describe('BitbucketTrigger', () => {
 
 				expect(bitbucketApiRequestSpy).toHaveBeenCalledWith(
 					'DELETE',
-					'/repositories/test-workspace/test-repo/hooks/12345678-1234-1234-1234-123456789012',
+					requestPath`/repositories/test-workspace/test-repo/hooks/12345678-1234-1234-1234-123456789012`,
 				);
 
 				expect(result).toBe(true);

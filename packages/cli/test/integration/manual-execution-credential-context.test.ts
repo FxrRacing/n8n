@@ -14,9 +14,9 @@ import { LicenseState } from '@n8n/backend-common';
 import { testDb, createWorkflow } from '@n8n/backend-test-utils';
 import { ExecutionRepository, InvalidAuthTokenRepository, type IWorkflowDb } from '@n8n/db';
 import { Container } from '@n8n/di';
-import { mock } from 'jest-mock-extended';
 import { Cipher } from 'n8n-core';
 import { toCredentialContext, toExecutionContext, type IExecutionContext } from 'n8n-workflow';
+import { mock } from 'vitest-mock-extended';
 
 import { AuthService } from '@/auth/auth.service';
 import { N8NIdentifier } from '@/modules/dynamic-credentials.ee/credential-resolvers/identifiers/n8n-identifier';
@@ -100,13 +100,12 @@ describe('Manual execution credential context (integration)', () => {
 			user,
 		);
 
-		const result = await workflowExecutionService.executeManually(
-			workflow,
-			{ triggerToStartFrom: { name: 'Trigger' } },
+		const result = await workflowExecutionService.executeManually({
+			workflowData: workflow,
+			payload: { triggerToStartFrom: { name: 'Trigger' } },
 			user,
-			undefined,
-			cookie,
-		);
+			n8nAuthCookie: cookie,
+		});
 
 		if (!('executionId' in result)) {
 			throw new Error(`Expected an executionId, got ${JSON.stringify(result)}`);

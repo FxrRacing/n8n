@@ -3,14 +3,15 @@ import {
 	SharedCredentialsRepository,
 	SharedWorkflowRepository,
 	UserRepository,
+	isPerson,
+	type Person,
 	type Project,
 	type User,
 } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { In } from '@n8n/typeorm';
 
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
+import { ForbiddenError, NotFoundError } from '@n8n/errors';
 
 const INSTANCE_OWNER_ROLE = 'global:owner';
 const WORKFLOW_EDITOR = 'workflow:editor' as const;
@@ -32,12 +33,12 @@ export class FxrSharingService {
 		private readonly userRepository: UserRepository,
 	) {}
 
-	/** Users that can be picked as sharees: active, non-pending, not the caller. */
+	/** People that can be picked as sharees: active, non-pending, not the caller. */
 	async listCandidateUsers(caller: User): Promise<Sharee[]> {
-		const users = await this.userRepository.find({
-			select: ['id', 'email', 'firstName', 'lastName', 'password', 'disabled'],
-		});
+		// The user table also holds service accounts; only people can be sharees.
+		const users = await this.userRepository.find();
 		return users
+			.filter(isPerson)
 			.filter((u) => u.id !== caller.id && !u.disabled && !u.isPending)
 			.map((u) => this.toSharee(u));
 	}
@@ -156,10 +157,10 @@ export class FxrSharingService {
 		const users = await Promise.all(
 			projectIds.map(async (id) => await this.userRepository.findPersonalOwnerForProject(id)),
 		);
-		return users.flatMap((u) => (u ? [this.toSharee(u)] : []));
+		return users.flatMap((u) => (u && isPerson(u) ? [this.toSharee(u)] : []));
 	}
 
-	private toSharee(u: User): Sharee {
+	private toSharee(u: Person): Sharee {
 		return { id: u.id, email: u.email, firstName: u.firstName, lastName: u.lastName };
 	}
 }

@@ -1,47 +1,10 @@
-import { AgentJsonConfigSchema, isNodeToolsEnabled, type AgentJsonConfig } from '@n8n/api-types';
+import { AgentJsonConfigSchema, type AgentJsonConfig } from '@n8n/api-types';
 
 const baseConfig: AgentJsonConfig = {
 	name: 'Test Agent',
-	model: 'anthropic/claude-sonnet-4-5',
+	model: 'anthropic/claude-sonnet-5-5',
 	instructions: 'Be helpful',
 };
-
-describe('AgentJsonConfigSchema — config.nodeTools', () => {
-	it('accepts a config without nodeTools', () => {
-		expect(AgentJsonConfigSchema.safeParse({ ...baseConfig, config: {} }).success).toBe(true);
-	});
-
-	it('accepts nodeTools: { enabled: true }', () => {
-		const parsed = AgentJsonConfigSchema.safeParse({
-			...baseConfig,
-			config: { nodeTools: { enabled: true } },
-		});
-		expect(parsed.success).toBe(true);
-	});
-
-	it('accepts nodeTools: { enabled: false }', () => {
-		const parsed = AgentJsonConfigSchema.safeParse({
-			...baseConfig,
-			config: { nodeTools: { enabled: false } },
-		});
-		expect(parsed.success).toBe(true);
-	});
-
-	it('rejects nodeTools without enabled', () => {
-		expect(
-			AgentJsonConfigSchema.safeParse({ ...baseConfig, config: { nodeTools: {} } }).success,
-		).toBe(false);
-	});
-
-	it('rejects nodeTools.enabled of the wrong type', () => {
-		expect(
-			AgentJsonConfigSchema.safeParse({
-				...baseConfig,
-				config: { nodeTools: { enabled: 'yes' } },
-			}).success,
-		).toBe(false);
-	});
-});
 
 describe('AgentJsonConfigSchema — skill refs', () => {
 	it('accepts a skill ref with a valid id', () => {
@@ -72,31 +35,47 @@ describe('AgentJsonConfigSchema — skill refs', () => {
 	});
 });
 
-describe('isNodeToolsEnabled', () => {
-	it('returns false when config is undefined', () => {
-		expect(isNodeToolsEnabled(undefined)).toBe(false);
-	});
-
-	it('returns false when config has no nodeTools field', () => {
-		expect(isNodeToolsEnabled({})).toBe(false);
-	});
-
-	it('returns false when nodeTools.enabled is false', () => {
-		expect(isNodeToolsEnabled({ nodeTools: { enabled: false } })).toBe(false);
-	});
-
-	it('returns true only when nodeTools.enabled is explicitly true', () => {
-		expect(isNodeToolsEnabled({ nodeTools: { enabled: true } })).toBe(true);
-	});
-});
-
 describe('AgentJsonConfigSchema — subAgents', () => {
-	it('accepts saved agent references', () => {
+	it('accepts legacy saved agent references without useWhen routing guidance', () => {
 		const parsed = AgentJsonConfigSchema.safeParse({
 			...baseConfig,
 			subAgents: { agents: [{ agentId: 'agent-1' }] },
 		});
 		expect(parsed.success).toBe(true);
+	});
+
+	it('accepts saved agent references with useWhen routing guidance', () => {
+		const parsed = AgentJsonConfigSchema.safeParse({
+			...baseConfig,
+			subAgents: {
+				agents: [
+					{
+						agentId: 'agent-1',
+						useWhen: 'Use for billing-policy questions and invoice investigations.',
+					},
+				],
+			},
+		});
+
+		expect(parsed.success).toBe(true);
+	});
+
+	it.each(['', '   ', 'Too short'])('accepts optional useWhen value %p', (useWhen) => {
+		const parsed = AgentJsonConfigSchema.safeParse({
+			...baseConfig,
+			subAgents: { agents: [{ agentId: 'agent-1', useWhen }] },
+		});
+
+		expect(parsed.success).toBe(true);
+	});
+
+	it('rejects useWhen values over 512 characters', () => {
+		const parsed = AgentJsonConfigSchema.safeParse({
+			...baseConfig,
+			subAgents: { agents: [{ agentId: 'agent-1', useWhen: 'a'.repeat(513) }] },
+		});
+
+		expect(parsed.success).toBe(false);
 	});
 
 	it('accepts an empty saved-agent reference list', () => {
@@ -156,7 +135,7 @@ describe('AgentJsonConfigSchema — memory.observationalMemory', () => {
 				observationalMemory: {
 					observerModel: { model: 'openai/gpt-4o-mini', credential: 'openai-key' },
 					reflectorModel: {
-						model: 'anthropic/claude-sonnet-4-5',
+						model: 'anthropic/claude-sonnet-5-5',
 						credential: 'anthropic-key',
 					},
 				},
@@ -166,7 +145,7 @@ describe('AgentJsonConfigSchema — memory.observationalMemory', () => {
 		expect(parsed.memory?.observationalMemory).toMatchObject({
 			observerModel: { model: 'openai/gpt-4o-mini', credential: 'openai-key' },
 			reflectorModel: {
-				model: 'anthropic/claude-sonnet-4-5',
+				model: 'anthropic/claude-sonnet-5-5',
 				credential: 'anthropic-key',
 			},
 		});
@@ -261,10 +240,61 @@ describe('AgentJsonConfigSchema — memory.observationalMemory', () => {
 		});
 		expect(parsed.success).toBe(true);
 	});
+
+	it.each([64_000, 0])('preserves a memory window cap of %i', (maxContextWindowTokens) => {
+		const parsed = AgentJsonConfigSchema.parse({
+			...baseConfig,
+			memory: {
+				...memoryBase,
+				observationalMemory: { windowShares: { maxContextWindowTokens } },
+			},
+		});
+		expect(parsed.memory?.observationalMemory).toEqual({
+			windowShares: { maxContextWindowTokens },
+		});
+	});
+
+	it('rejects a negative memory window cap', () => {
+		const parsed = AgentJsonConfigSchema.safeParse({
+			...baseConfig,
+			memory: {
+				...memoryBase,
+				observationalMemory: { windowShares: { maxContextWindowTokens: -1 } },
+			},
+		});
+		expect(parsed.success).toBe(false);
+	});
 });
 
 describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 	const memoryBase = { enabled: true, storage: 'n8n' as const };
+
+	const withGuidance = (guidance: unknown) =>
+		AgentJsonConfigSchema.safeParse({
+			...baseConfig,
+			memory: {
+				...memoryBase,
+				episodicMemory: { enabled: true, credential: 'credential-id', guidance },
+			},
+		});
+
+	it('trims and preserves capture guidance topics', () => {
+		const parsed = withGuidance({ include: [' timezone '], exclude: ['passwords'] });
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) return;
+		expect(parsed.data.memory?.episodicMemory).toMatchObject({
+			guidance: { include: ['timezone'], exclude: ['passwords'] },
+		});
+	});
+
+	it('rejects empty, too long, or too many capture guidance topics', () => {
+		expect(withGuidance({ include: ['  '] }).success).toBe(false);
+		expect(withGuidance({ exclude: ['x'.repeat(101)] }).success).toBe(false);
+		expect(
+			withGuidance({ include: Array.from({ length: 21 }, (_, i) => `topic ${i}`) }).success,
+		).toBe(false);
+	});
 
 	it('preserves episodic memory task models', () => {
 		const parsed = AgentJsonConfigSchema.parse({
@@ -274,9 +304,8 @@ describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 				episodicMemory: {
 					enabled: true,
 					credential: 'credential-id',
-					extractorModel: { model: 'openai/gpt-4o-mini', credential: 'openai-key' },
 					reflectorModel: {
-						model: 'anthropic/claude-sonnet-4-5',
+						model: 'anthropic/claude-sonnet-5-5',
 						credential: 'anthropic-key',
 					},
 				},
@@ -284,9 +313,8 @@ describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 		});
 
 		expect(parsed.memory?.episodicMemory).toMatchObject({
-			extractorModel: { model: 'openai/gpt-4o-mini', credential: 'openai-key' },
 			reflectorModel: {
-				model: 'anthropic/claude-sonnet-4-5',
+				model: 'anthropic/claude-sonnet-5-5',
 				credential: 'anthropic-key',
 			},
 		});
@@ -300,7 +328,7 @@ describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 				episodicMemory: {
 					enabled: true,
 					credential: 'credential-id',
-					extractorModel: 'openai/gpt-4o-mini',
+					reflectorModel: 'openai/gpt-4o-mini',
 				},
 			},
 		});
@@ -318,6 +346,24 @@ describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 		});
 
 		expect(parsed.success).toBe(true);
+	});
+
+	it('accepts managed episodic memory credentials', () => {
+		const parsed = AgentJsonConfigSchema.safeParse({
+			...baseConfig,
+			memory: {
+				...memoryBase,
+				episodicMemory: { enabled: true, credential: 'managed' },
+			},
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) return;
+
+		expect(parsed.data.memory?.episodicMemory).toMatchObject({
+			enabled: true,
+			credential: 'managed',
+		});
 	});
 
 	it('accepts whitespace-only episodic memory credentials after trim', () => {
@@ -344,7 +390,7 @@ describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 				episodicMemory: {
 					enabled: true,
 					credential: 'credential-id',
-					extractorModel: { model: 'openai/gpt-4o-mini', credential: '' },
+					reflectorModel: { model: 'openai/gpt-4o-mini', credential: '' },
 				},
 			},
 		});
@@ -360,7 +406,7 @@ describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 				episodicMemory: {
 					enabled: true,
 					credential: 'credential-id',
-					extractorModel: { model: 'openai/gpt-4o-mini', credential: '   ' },
+					reflectorModel: { model: 'openai/gpt-4o-mini', credential: '   ' },
 				},
 			},
 		});
@@ -370,7 +416,7 @@ describe('AgentJsonConfigSchema — memory.episodicMemory', () => {
 
 		const episodicMemory = parsed.data.memory?.episodicMemory;
 		expect(episodicMemory).toMatchObject({
-			extractorModel: { model: 'openai/gpt-4o-mini', credential: '' },
+			reflectorModel: { model: 'openai/gpt-4o-mini', credential: '' },
 		});
 	});
 });

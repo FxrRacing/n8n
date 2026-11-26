@@ -1,22 +1,23 @@
 import type { GenerateInsightsDto } from '@n8n/api-types';
 import { EVAL_COLLECTIONS_FLAG } from '@n8n/api-types';
 import type { Logger } from '@n8n/backend-common';
+import type { PostHogClient } from '@n8n/backend-services';
 import type { AuthenticatedRequest, User } from '@n8n/db';
 import { ControllerRegistryMetadata } from '@n8n/decorators';
 import { Container } from '@n8n/di';
-import { mock } from 'jest-mock-extended';
+import type { Mocked } from 'vitest';
+import { mock } from 'vitest-mock-extended';
 
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
-import type { PostHogClient } from '@/posthog';
+import { NotFoundError } from '@n8n/errors';
 
 import { EvalInsightsController } from '../eval-insights.controller.ee';
 import type { EvalInsightsService } from '../eval-insights.service';
 
 describe('EvalInsightsController', () => {
 	let controller: EvalInsightsController;
-	let service: jest.Mocked<EvalInsightsService>;
-	let postHogClient: jest.Mocked<PostHogClient>;
-	let logger: jest.Mocked<Logger>;
+	let service: Mocked<EvalInsightsService>;
+	let postHogClient: Mocked<PostHogClient>;
+	let logger: Mocked<Logger>;
 
 	const user = mock<User>({ id: 'user-1' });
 

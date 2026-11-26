@@ -1,12 +1,13 @@
 import { Logger } from '@n8n/backend-common';
+import { EventService } from '@n8n/backend-services';
 import { Get, RestController } from '@n8n/decorators';
 import { Response } from 'express';
-import { ensureError, jsonStringify } from 'n8n-workflow';
+import { ensureError } from '@n8n/utils/errors/ensure-error';
 
-import { EventService } from '@/events/event.service';
-import { OAuthRequest } from '@/requests';
-
+import { CredentialsOverwrites } from '@/credentials-overwrites';
+import { withTokenVersion } from '@/managed-versions';
 import { OauthService, type OAuth1CredentialData } from '@/oauth/oauth.service';
+import { OAuthRequest } from '@/requests';
 
 @RestController('/oauth1-credential')
 export class OAuth1CredentialController {
@@ -14,12 +15,13 @@ export class OAuth1CredentialController {
 		private readonly oauthService: OauthService,
 		private readonly logger: Logger,
 		private readonly eventService: EventService,
+		private readonly credentialsOverwrites: CredentialsOverwrites,
 	) {}
 
 	/** Get Authorization url */
 	@Get('/auth')
 	async getAuthUri(req: OAuthRequest.OAuth1Credential.Auth, res: Response): Promise<string> {
-		const credential = await this.oauthService.getCredentialForUpdate(req);
+		const credential = await this.oauthService.getCredentialForAuthFlow(req);
 		const csrfData = await this.oauthService.buildCsrfStateData(credential, req);
 		const uri = await this.oauthService.generateAOauth1AuthUri(credential, csrfData, req, res);
 
@@ -45,25 +47,24 @@ export class OAuth1CredentialController {
 				);
 			}
 
-			const [credential, decryptedData, oauthCredentials, state] =
+			const [credential, decryptedDataOriginal, oauthCredentials, state, flowState] =
 				await this.oauthService.resolveCredential<OAuth1CredentialData>(req);
-
-			const oauthTokenSecret =
-				typeof decryptedData.oauth_token_secret === 'string'
-					? decryptedData.oauth_token_secret
-					: '';
 
 			const oauthTokenData = await this.oauthService.getOAuth1AccessToken(oauthCredentials, {
 				oauthToken: oauth_token,
 				oauthVerifier: oauth_verifier,
-				oauthTokenSecret,
+				oauthTokenSecret: flowState.oauthTokenSecret ?? '',
 			});
 
+			// Store the managed app version with the tokens, so every later request of this
+			// credential uses the app that issued them.
+			const tokenDataToSave =
+				flowState.managedVersion === undefined
+					? oauthTokenData
+					: withTokenVersion(oauthTokenData, flowState.managedVersion);
+
 			if (!state.origin || state.origin === 'static-credential') {
-				await this.oauthService.encryptAndSaveData(credential, { oauthTokenData }, [
-					'csrfSecret',
-					'oauth_token_secret',
-				]);
+				await this.oauthService.encryptAndSaveData(credential, { oauthTokenData: tokenDataToSave });
 
 				this.logger.debug('OAuth1 callback successful for new credential', {
 					credentialId: credential.id,
@@ -86,7 +87,7 @@ export class OAuth1CredentialController {
 
 				await this.oauthService.saveDynamicCredential(
 					credential,
-					oauthTokenData,
+					tokenDataToSave,
 					state.authorizationHeader.split('Bearer ')[1],
 					state.credentialResolverId,
 					(state.authMetadata as Record<string, unknown>) ?? {},
@@ -97,6 +98,11 @@ export class OAuth1CredentialController {
 						user: { id: state.userId },
 						credentialType: credential.type,
 						credentialId: credential.id,
+						supportsManagedAuth: this.credentialsOverwrites.supportsManagedAuth(credential.type),
+						usesManagedAuth: this.credentialsOverwrites.usesManagedAuth(
+							credential.type,
+							decryptedDataOriginal,
+						),
 					});
 				}
 
@@ -104,10 +110,11 @@ export class OAuth1CredentialController {
 			}
 		} catch (e) {
 			const error = ensureError(e);
+			this.logger.error('OAuth1 callback failed', { error, cause: error.cause });
 			return this.oauthService.renderCallbackError(
 				res,
 				error.message,
-				'body' in error ? jsonStringify(error.body) : undefined,
+				this.oauthService.extractCallbackErrorReason(error),
 			);
 		}
 	}

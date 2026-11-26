@@ -1,60 +1,165 @@
-import type { Project, User } from '@n8n/db';
+import type { SerializedCredential, SerializedCredentialData } from '@n8n/api-types';
 
-import type { CredentialMatchingMode, CredentialMissingMode } from '../../n8n-packages.types';
-import type { PackageCredentialRequirement } from '../../spec/requirements.schema';
+import type {
+	ImportBindingMap,
+	CredentialConflictPolicy,
+	CredentialPersonalRoute,
+	CredentialMatchingMode,
+	CredentialMissingMode,
+} from '../../n8n-packages.types';
+import type {
+	PackageCredentialRequirement,
+	PackageRequirementConsumer,
+} from '../../spec/requirements.schema';
+import type { AgentRequirementSource } from '../requirement-source';
 
-export interface WorkflowCredentialRequirement {
-	workflowId: string;
+/** A requirement enriched with the expression data the package bundles for it, when any. */
+export type PlacedCredentialRequirement = PackageCredentialRequirement & {
+	packageData?: SerializedCredentialData;
+	packageDataIsComplete?: boolean;
+	/** Package description. `null` clears it. Absent when the source did not export descriptions. */
+	packageDescription?: string | null;
+};
+
+export interface CredentialReference {
 	credentialId: string;
-	credentialName: string;
-	credentialType: string;
+	credentialName?: string;
+	credentialType?: string;
 }
 
-export type CredentialResolutionFailureKind = 'not_found' | 'unknown_type';
+export interface WorkflowCredentialRequirement extends Required<CredentialReference> {
+	workflowId: string;
+}
+
+export type CredentialRequirement =
+	| WorkflowCredentialRequirement
+	| (AgentRequirementSource & CredentialReference);
+
+export type CredentialResolutionFailureKind =
+	| 'not_found'
+	| 'unknown_type'
+	| 'source_not_found'
+	| 'type_mismatch';
+
+/**
+ * Why the user cannot use a credential that a reference names by id, for `not_found`.
+ * Set only for a user who can read all credentials.
+ * - `not-on-instance`: no credential has the id.
+ * - `access-required`: the credential exists, but it is not shared with the target project.
+ * - `incompatible-usage-scope`: the credential exists, but it is not a project credential.
+ */
+export type CredentialNotFoundReason =
+	| 'not-on-instance'
+	| 'access-required'
+	| 'incompatible-usage-scope';
 
 export type CredentialResolutionFailure = {
 	kind: CredentialResolutionFailureKind;
+	/** For `not_found` of a credential the matcher looked up by id. */
+	reason?: CredentialNotFoundReason;
 	sourceId: string;
-	usedByWorkflows: string[];
+	name?: string;
+	type?: string;
+	targetId?: string;
+	/** For `type_mismatch`: the credential type the package's workflow node requires. */
+	expectedType?: string;
+	/** For `type_mismatch`: the actual type of the resolved target credential. */
+	actualType?: string;
 };
 
-export interface CredentialBinding {
-	sourceId: string;
-	targetId: string;
-}
-
-/**
- * Maps each source credential id to the target credential id it resolved to. A `Map` (rather
- * than a `CredentialBinding[]`) both encodes the one-target-per-source invariant and gives the
- * remapping step an O(1) `get(sourceId)` lookup when rewriting node credential references.
- */
-export type CredentialBindings = Map<string, string>;
-
 export interface CredentialResolution {
-	successes: CredentialBindings;
+	successes: ImportBindingMap;
 	failures: CredentialResolutionFailure[];
 }
 
-export interface CredentialBindingRequest {
-	requirements: PackageCredentialRequirement[] | undefined;
-	matchingMode: CredentialMatchingMode;
-	missingMode: CredentialMissingMode;
-	targetProject: Project;
-	user: User;
+/** A package credential and the destination credential it resolves to. */
+export interface CredentialMatch {
+	sourceId: string;
+	targetId: string;
+	/** Destination credential name, for reporting. */
+	targetName: string;
+	usedBy: PackageRequirementConsumer[];
 }
 
 /**
- * Context a missing-mode handler may need to act on unresolved credentials, e.g.
- * `create-stubs` reads `requirements` for credential type/name and owns new stubs in `targetProject`.
+ * A matched destination credential that the conflict policy can update, with the package
+ * payload for it. Holds no stored values: the write decrypts and merges again.
  */
-export interface CredentialMissingModeContext {
-	requirements: PackageCredentialRequirement[] | undefined;
-	targetProject: Project;
-	user: User;
+export interface CredentialUpdateCandidate extends CredentialMatch {
+	/** Stored type of the destination credential. An update never changes it. */
+	targetType: string;
+	/** Project on the `credential:owner` sharing of the destination credential. */
+	ownerProjectId: string;
+	/** Package credential name. */
+	name: string;
+	/** Package expression values. Absent when the package was exported without values. */
+	data?: SerializedCredentialData;
+	/** Package description. `null` clears it. Absent means the package does not decide it. */
+	description?: string | null;
 }
 
-export function createSuccessBinding(sourceId: string, targetId: string): CredentialBinding {
-	return { sourceId, targetId };
+export interface CredentialImportPlan extends CredentialResolution {
+	stubIds: ImportBindingMap;
+	/** Matched credentials the conflict policy can update. Empty under `keep-existing`. */
+	candidates: CredentialUpdateCandidate[];
+	/** The candidates that `overwrite` would change. */
+	updates: CredentialUpdateCandidate[];
+	/** Matches in the update scope that the user cannot update. Empty under `keep-existing`. */
+	forbidden: CredentialMatch[];
+}
+
+/**
+ * - `differs`: under `fail`, the package would change the destination credential.
+ * - `divergent`: under `overwrite`, two or more package credentials with different
+ *   payloads resolve to one destination credential.
+ */
+export interface CredentialConflict {
+	kind: 'differs' | 'divergent';
+	targetId: string;
+	sourceIds: string[];
+	/** Destination credential name. */
+	name: string;
+	usedBy: PackageRequirementConsumer[];
+}
+
+/**
+ * A destination credential in the update scope that the importing user cannot update.
+ * Blocks under `overwrite` and `fail`, also when it would not change: its stored values are
+ * never read.
+ */
+export type CredentialUpdateForbidden = Omit<CredentialConflict, 'kind'>;
+
+/** Which matched destination credentials the conflict policy can update. */
+export interface CredentialUpdateScope {
+	/** Destination projects of the import. A credential owned by one of them is in scope. */
+	projectIds: ReadonlySet<string>;
+}
+
+/** What binding wrote: the source → target map, and the credentials created for missing ones. */
+export interface CredentialBindResult {
+	bindings: ImportBindingMap;
+	matched: string[];
+	stubbed: string[];
+	seeded: string[];
+	incomplete: string[];
+}
+
+export interface CredentialApplyResult extends CredentialBindResult {
+	/** Source ids whose destination credential this scope wrote under `overwrite`. */
+	updated: string[];
+}
+
+export interface CredentialBindingRequest {
+	requirements: PlacedCredentialRequirement[] | undefined;
+	matchingMode: CredentialMatchingMode;
+	missingMode: CredentialMissingMode;
+	credentialBindings?: ImportBindingMap;
+	conflictPolicy: CredentialConflictPolicy;
+	/** Omitted means `allow`. */
+	personalRoute?: CredentialPersonalRoute;
+	/** Package credential files by credential id. Read only when the policy is not `keep-existing`. */
+	packageCredentials?: ReadonlyMap<string, SerializedCredential>;
+	updateScope: CredentialUpdateScope;
 }
 
 export function createFailure(
@@ -64,13 +169,7 @@ export function createFailure(
 	return {
 		kind,
 		sourceId: reference.id,
-		usedByWorkflows: [...reference.usedByWorkflows].sort(),
+		name: reference.name,
+		type: reference.type,
 	};
-}
-
-/** Flattens the internal lookup `Map` into the serializable pairs exposed via events/responses. */
-export function resolvedBindingsToSummaries(
-	successes: CredentialBindings,
-): Array<{ sourceId: string; targetId: string }> {
-	return [...successes].map(([sourceId, targetId]) => ({ sourceId, targetId }));
 }

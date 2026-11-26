@@ -1,5 +1,6 @@
 import type { InstanceAiAgentNode, InstanceAiMessage } from '@n8n/api-types';
 
+import { buildThreadArtifactsBlock, buildThreadContextBlock } from '../internal-messages';
 import {
 	collectConfirmationRequestIds,
 	markExpiredConfirmations,
@@ -28,6 +29,113 @@ function makeSnapshotTree(text = 'Snapshot text'): InstanceAiAgentNode {
 
 describe('parseStoredMessages', () => {
 	describe('user messages', () => {
+		// AGENT-1090: History must restore the image parts beside the user text.
+		it.each(['Build from this image', ''])('restores a saved image with user text %j', (text) => {
+			const result = parseStoredMessages([
+				{
+					id: 'msg-image',
+					role: 'user',
+					createdAt: makeDate(),
+					content: [
+						{
+							type: 'text',
+							text: `${text}\n\n[ATTACHMENTS]\n- [0] \`diagram.png\` (image/png): not a supported structured format\n[/ATTACHMENTS]`,
+						},
+						{ type: 'file', mediaType: 'image/png', data: 'aW1hZ2U=' },
+					],
+				},
+			]);
+
+			expect(result[0].content).toBe(text);
+			expect(result[0].attachments).toEqual([
+				{ type: 'file', fileName: 'diagram.png', mimeType: 'image/png', data: 'aW1hZ2U=' },
+			]);
+		});
+
+		it('keeps the names and order of images beside structured attachments', () => {
+			const result = parseStoredMessages([
+				{
+					id: 'msg-files',
+					role: 'user',
+					createdAt: makeDate(),
+					content: [
+						{
+							type: 'text',
+							text: 'Compare these\n\n[ATTACHMENTS]\n- [0] `rows.csv` (text/csv): parseable via parse-file (format: csv)\n- [1] `first.png` (image/png): not a supported structured format\n- [2] `second.png` (image/png): not a supported structured format\n[/ATTACHMENTS]',
+						},
+						{ type: 'file', mediaType: 'image/png', data: 'Zmlyc3Q=' },
+						{ type: 'file', mediaType: 'image/png', data: 'c2Vjb25k' },
+					],
+				},
+			]);
+
+			expect(result[0].attachments).toEqual([
+				{ type: 'file', fileName: 'first.png', mimeType: 'image/png', data: 'Zmlyc3Q=' },
+				{ type: 'file', fileName: 'second.png', mimeType: 'image/png', data: 'c2Vjb25k' },
+			]);
+			expect(result[0].content).toBe(
+				'Compare these\n\n[ATTACHMENTS]\n- [0] `rows.csv` (text/csv): parseable via parse-file (format: csv)\n[/ATTACHMENTS]',
+			);
+		});
+
+		it('keeps attachment-like user text when there are no saved files', () => {
+			const content =
+				'Explain [ATTACHMENTS]\n- [0] `file.png` (image/png): example\n[/ATTACHMENTS]';
+			const result = parseStoredMessages([
+				{ id: 'msg-1', role: 'user', content, createdAt: makeDate() },
+			]);
+
+			expect(result[0].content).toBe(content);
+			expect(result[0].attachments).toBeUndefined();
+		});
+
+		it('restores image and resource attachments after it removes internal context', () => {
+			const workflow = { type: 'workflow' as const, id: 'wf-1', name: 'Digest' };
+			const context = buildThreadContextBlock([buildThreadArtifactsBlock(undefined, [workflow])]);
+			const result = parseStoredMessages([
+				{
+					id: 'msg-mixed',
+					role: 'user',
+					createdAt: makeDate(),
+					content: [
+						{
+							type: 'text',
+							text: `${context}\n\nUpdate this\n\n[ATTACHMENTS]\n- [0] \`diagram.png\` (image/png): not a supported structured format\n[/ATTACHMENTS]`,
+						},
+						{ type: 'file', mediaType: 'image/png', data: 'aW1hZ2U=' },
+					],
+				},
+			]);
+
+			expect(result[0].content).toBe('Update this');
+			expect(result[0].attachments).toEqual([
+				workflow,
+				{ type: 'file', fileName: 'diagram.png', mimeType: 'image/png', data: 'aW1hZ2U=' },
+			]);
+		});
+
+		it('restores files without a manifest and skips incomplete file parts', () => {
+			const result = parseStoredMessages([
+				{
+					id: 'msg-files',
+					role: 'user',
+					createdAt: makeDate(),
+					content: [
+						{ type: 'text', text: 'Look at this' },
+						{ type: 'file', mediaType: 'image/png', data: 'aW1hZ2U=' },
+						{ type: 'file', mediaType: 'image/png' },
+						{ type: 'file', data: 'aW1hZ2U=' },
+						{ type: 'file', mediaType: 'image/png', data: '' },
+					],
+				},
+			]);
+
+			expect(result[0].content).toBe('Look at this');
+			expect(result[0].attachments).toEqual([
+				{ type: 'file', fileName: 'attachment', mimeType: 'image/png', data: 'aW1hZ2U=' },
+			]);
+		});
+
 		it('should parse user message with string content', () => {
 			const messages: StoredAgentMessage[] = [
 				{
@@ -92,156 +200,8 @@ describe('parseStoredMessages', () => {
 			expect(assistant.content).toBe('Hello! How can I help?');
 			expect(assistant.reasoning).toBe('');
 			expect(assistant.isStreaming).toBe(false);
-			expect(assistant.agentTree).toBeDefined();
-			expect(assistant.agentTree?.textContent).toBe('Hello! How can I help?');
-		});
-
-		it('should parse assistant message with tool invocations (result state)', () => {
-			const messages: StoredAgentMessage[] = [
-				{
-					id: 'msg-u',
-					role: 'user',
-					content: 'List workflows',
-					createdAt: makeDate(),
-				},
-				{
-					id: 'msg-a',
-					role: 'assistant',
-					content: [
-						{ type: 'text', text: 'Here are your workflows' },
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-1',
-							toolName: 'list-workflows',
-							input: { limit: 10 },
-							state: 'resolved',
-							output: { workflows: ['wf1'] },
-						},
-					],
-					createdAt: makeDate(1),
-				},
-			];
-
-			const result = parseStoredMessages(messages);
-
-			const assistant = result[1];
-			expect(assistant.agentTree?.toolCalls).toHaveLength(1);
-			expect(assistant.agentTree?.toolCalls[0]).toMatchObject({
-				toolCallId: 'tc-1',
-				toolName: 'list-workflows',
-				args: { limit: 10 },
-				result: { workflows: ['wf1'] },
-				isLoading: false,
-				renderHint: 'default',
-			});
-		});
-
-		it('should parse assistant message with tool invocations (call state - interrupted)', () => {
-			const messages: StoredAgentMessage[] = [
-				{
-					id: 'msg-u',
-					role: 'user',
-					content: 'Do something',
-					createdAt: makeDate(),
-				},
-				{
-					id: 'msg-a',
-					role: 'assistant',
-					content: [
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-2',
-							toolName: 'task-control',
-							input: { tasks: [] },
-						},
-					],
-					createdAt: makeDate(1),
-				},
-			];
-
-			const result = parseStoredMessages(messages);
-
-			const tc = result[1].agentTree?.toolCalls[0];
-			expect(tc?.isLoading).toBe(true);
-			expect(tc?.result).toBeUndefined();
-			expect(tc?.renderHint).toBe('tasks');
-		});
-
-		it('should surface rejected tool calls via `error`, not `result`', () => {
-			const messages: StoredAgentMessage[] = [
-				{
-					id: 'msg-u',
-					role: 'user',
-					content: 'Do something',
-					createdAt: makeDate(),
-				},
-				{
-					id: 'msg-a',
-					role: 'assistant',
-					content: [
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-rej',
-							toolName: 'workflows',
-							input: { name: 'x' },
-							state: 'rejected',
-							error: 'Workflow not found',
-						},
-					],
-					createdAt: makeDate(1),
-				},
-			];
-
-			const result = parseStoredMessages(messages);
-
-			const tc = result[1].agentTree?.toolCalls[0];
-			expect(tc?.isLoading).toBe(false);
-			expect(tc?.result).toBeUndefined();
-			expect(tc?.error).toBe('Workflow not found');
-		});
-
-		it('should skip malformed tool-call parts instead of rendering half-populated cards', () => {
-			const messages: StoredAgentMessage[] = [
-				{
-					id: 'msg-u',
-					role: 'user',
-					content: 'Go',
-					createdAt: makeDate(),
-				},
-				{
-					id: 'msg-a',
-					role: 'assistant',
-					content: [
-						// Valid tool call — should survive.
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-ok',
-							toolName: 'list-workflows',
-							input: {},
-							state: 'resolved',
-							output: { ok: true },
-						},
-						// Missing toolName — fails the schema, must be dropped.
-						{ type: 'tool-call', toolCallId: 'tc-no-name', input: {}, state: 'resolved' },
-						// Missing toolCallId — dropped.
-						{ type: 'tool-call', toolName: 'orphan', input: {}, state: 'resolved' },
-						// `error` wrong type for a rejected call — dropped.
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-bad-error',
-							toolName: 'workflows',
-							state: 'rejected',
-							error: { not: 'a string' },
-						},
-					],
-					createdAt: makeDate(1),
-				},
-			];
-
-			const result = parseStoredMessages(messages);
-
-			const toolCalls = result[1].agentTree?.toolCalls ?? [];
-			expect(toolCalls.map((tc) => tc.toolCallId)).toEqual(['tc-ok']);
+			// No snapshot → the row renders from its own content, without a tree.
+			expect(assistant.agentTree).toBeUndefined();
 		});
 
 		it('should drop content parts with an unrecognized type', () => {
@@ -267,7 +227,7 @@ describe('parseStoredMessages', () => {
 			const result = parseStoredMessages(messages);
 
 			expect(result[1].content).toBe('Hello');
-			expect(result[1].agentTree?.timeline).toEqual([{ type: 'text', content: 'Hello' }]);
+			expect(result[1].agentTree).toBeUndefined();
 		});
 
 		it('should parse reasoning from native parts', () => {
@@ -293,6 +253,72 @@ describe('parseStoredMessages', () => {
 
 			expect(result[1].reasoning).toBe('Reasoning part');
 			expect(result[1].content).toBe('Answer');
+			expect(result[1].agentTree).toBeUndefined();
+		});
+
+		it('should parse reasoning-only assistant messages without a tree', () => {
+			const messages: StoredAgentMessage[] = [
+				{
+					id: 'msg-u',
+					role: 'user',
+					content: 'Think only',
+					createdAt: makeDate(),
+				},
+				{
+					id: 'msg-a',
+					role: 'assistant',
+					content: [{ type: 'reasoning', text: 'Just reasoning' }],
+					createdAt: makeDate(1),
+				},
+			];
+
+			const result = parseStoredMessages(messages);
+
+			expect(result[1].reasoning).toBe('Just reasoning');
+			expect(result[1].content).toBe('');
+			expect(result[1].agentTree).toBeUndefined();
+		});
+
+		it('should normalize legacy aggregate reasoning into the timeline on reload', () => {
+			const messages: StoredAgentMessage[] = [
+				{
+					id: 'msg-u',
+					role: 'user',
+					content: 'Think',
+					createdAt: makeDate(),
+				},
+				{
+					id: 'msg-a',
+					role: 'assistant',
+					content: [{ type: 'text', text: 'Answer' }],
+					createdAt: makeDate(1),
+				},
+			];
+			const snapshotTree: InstanceAiAgentNode = {
+				agentId: 'agent-001',
+				role: 'orchestrator',
+				status: 'completed',
+				textContent: 'Answer',
+				reasoning: 'Legacy aggregate reasoning',
+				toolCalls: [],
+				children: [],
+				timeline: [{ type: 'text', content: 'Answer' }],
+			};
+
+			const result = parseStoredMessages(messages, [
+				{
+					tree: snapshotTree,
+					runId: 'run_x',
+					messageGroupId: 'mg_x',
+					createdAt: makeDate(1),
+					updatedAt: makeDate(1),
+				},
+			]);
+
+			expect(result[1].agentTree?.timeline).toEqual([
+				{ type: 'reasoning', content: 'Legacy aggregate reasoning' },
+				{ type: 'text', content: 'Answer' },
+			]);
 		});
 
 		it('should use agentTree snapshot when available', () => {
@@ -348,6 +374,188 @@ describe('parseStoredMessages', () => {
 			expect(result[1].agentTree?.children).toHaveLength(1);
 			// Should use the native runId from the snapshot (not the user message id)
 			expect(result[1].runId).toBe('run_abc123');
+		});
+
+		it('should keep a task-list-only snapshot instead of discarding it as empty', () => {
+			const messages: StoredAgentMessage[] = [
+				{ id: 'msg-u', role: 'user', content: 'plan it', createdAt: makeDate() },
+				{
+					id: 'msg-a',
+					role: 'assistant',
+					content: [{ type: 'text', text: "Here's the plan" }],
+					createdAt: makeDate(1),
+				},
+			];
+			// The snapshot carries only a task checklist — no text/tools/timeline. It must
+			// still count as renderable, otherwise the checklist UI is lost on reload.
+			const taskTree: InstanceAiAgentNode = {
+				agentId: 'agent-001',
+				role: 'orchestrator',
+				status: 'completed',
+				textContent: '',
+				reasoning: '',
+				toolCalls: [],
+				children: [],
+				timeline: [],
+				tasks: { tasks: [{ id: 't1', description: 'Do the thing', status: 'todo' }] },
+			};
+			const snapshots = [
+				{
+					tree: taskTree,
+					runId: 'run_x',
+					messageGroupId: 'mg_x',
+					createdAt: makeDate(2),
+					updatedAt: makeDate(2),
+				},
+			];
+
+			const result = parseStoredMessages(messages, snapshots);
+
+			const assistant = result.find((m) => m.role === 'assistant');
+			// The snapshot tree (with its checklist) is used, not a flat fallback that drops it.
+			expect(assistant?.agentTree?.tasks?.tasks).toHaveLength(1);
+		});
+
+		it('should keep a setup-items-only snapshot instead of discarding it as empty', () => {
+			const messages: StoredAgentMessage[] = [
+				{ id: 'msg-u', role: 'user', content: 'Build something', createdAt: makeDate() },
+				// The turn's only durable trace is the setup-items event: no text, no
+				// tool calls. The tree must still count as renderable or the panel's
+				// event feed loses the items on reload.
+				{ id: 'msg-a', role: 'assistant', content: [], createdAt: makeDate(1) },
+			];
+			const setupOnlyTree: InstanceAiAgentNode = {
+				agentId: 'agent-001',
+				role: 'orchestrator',
+				status: 'completed',
+				textContent: '',
+				reasoning: '',
+				toolCalls: [],
+				children: [],
+				timeline: [],
+				setupItemsByWorkflowId: {
+					['wf-1']: [
+						{
+							id: 'wf-1:credential:slackApi',
+							kind: 'credential',
+							credentialType: 'slackApi',
+						},
+					],
+				},
+			};
+			const snapshots = [
+				{
+					tree: setupOnlyTree,
+					runId: 'run_x',
+					messageGroupId: 'mg_x',
+					createdAt: makeDate(1),
+					updatedAt: makeDate(1),
+				},
+			];
+
+			const result = parseStoredMessages(messages, snapshots);
+
+			const assistant = result.find((m) => m.role === 'assistant');
+			expect(assistant?.agentTree?.setupItemsByWorkflowId?.['wf-1']).toHaveLength(1);
+		});
+
+		it('should collapse an empty leading-orphan snapshot into the turn instead of rendering an empty card', () => {
+			// Real-world (thread 36a79497 / fal.ai build): a completed run whose snapshot was
+			// rebuilt from an already-evicted event bus, persisting an empty `agent-001` tree
+			// tagged with the turn's messageGroupId. Its createdAt sits at run start — before
+			// every assistant row — so it is consumed as a chronological *orphan* rather than
+			// paired. The empty orphan must not surface as an assistant card of its own:
+			// group-id propagation folds it into the turn and the kept row renders from its
+			// own content, without the empty tree leaking through.
+			const tc = (toolCallId: string, toolName: string) => ({
+				type: 'tool-call' as const,
+				toolCallId,
+				toolName,
+				input: {},
+				state: 'resolved' as const,
+				output: {},
+			});
+			const messages: StoredAgentMessage[] = [
+				{ id: 'u', role: 'user', content: 'generate content with fal.ai', createdAt: makeDate(0) },
+				{
+					id: 'a1',
+					role: 'assistant',
+					content: [tc('t1', 'workspace_write_file')],
+					createdAt: makeDate(20),
+				},
+				{ id: 'a2', role: 'assistant', content: [tc('t2', 'workflows')], createdAt: makeDate(30) },
+				{
+					id: 'a3',
+					role: 'assistant',
+					content: [{ type: 'text', text: 'The workflow is built and verified.' }],
+					createdAt: makeDate(40),
+				},
+			];
+			const emptyTree: InstanceAiAgentNode = {
+				agentId: 'agent-001',
+				role: 'orchestrator',
+				status: 'completed',
+				textContent: '',
+				reasoning: '',
+				toolCalls: [],
+				children: [],
+				timeline: [],
+			};
+			const snapshots = [
+				{
+					tree: emptyTree,
+					runId: 'run_h4',
+					messageGroupId: 'mg_1',
+					runIds: ['run_h4'],
+					// Before every assistant row → consumed as a leading orphan, not paired.
+					createdAt: makeDate(5),
+					updatedAt: makeDate(5),
+				},
+			];
+
+			const result = parseStoredMessages(messages, snapshots);
+
+			const assistants = result.filter((m) => m.role === 'assistant');
+			expect(assistants).toHaveLength(1);
+			// The non-renderable orphan tree is never authoritative.
+			expect(assistants[0].agentTree).toBeUndefined();
+			expect(assistants[0].content).toBe('The workflow is built and verified.');
+			expect(assistants[0].messageGroupId).toBe('mg_1');
+		});
+
+		it('should not surface an empty paired snapshot tree on a content-less assistant row', () => {
+			// Same invariant as the orphan guard, on the *pairing* path: a non-renderable
+			// snapshot must never be authoritative — the row must end up with no tree, not
+			// the empty `agent-001` snapshot tree leaking through.
+			const messages: StoredAgentMessage[] = [
+				{ id: 'u', role: 'user', content: 'do nothing', createdAt: makeDate(0) },
+				{ id: 'a', role: 'assistant', content: [], createdAt: makeDate(1) },
+			];
+			const emptyTree: InstanceAiAgentNode = {
+				agentId: 'agent-001',
+				role: 'orchestrator',
+				status: 'completed',
+				textContent: '',
+				reasoning: '',
+				toolCalls: [],
+				children: [],
+				timeline: [],
+			};
+
+			const result = parseStoredMessages(messages, [
+				{
+					tree: emptyTree,
+					runId: 'run_x',
+					messageGroupId: 'mg_x',
+					createdAt: makeDate(1),
+					updatedAt: makeDate(1),
+				},
+			]);
+
+			const assistant = result.find((m) => m.role === 'assistant');
+			expect(assistant?.agentTree).toBeUndefined();
+			// Grouping metadata from the snapshot is still attached.
+			expect(assistant?.messageGroupId).toBe('mg_x');
 		});
 
 		it('should hydrate orphan snapshots without a matching assistant message', () => {
@@ -496,15 +704,12 @@ describe('parseStoredMessages', () => {
 			});
 		});
 
-		it('should keep the snapshot tree when dedupe collapses in-flight checkpoint messages', () => {
-			// Simulates the in-flight HITL case: the SDK hasn't committed
-			// the turn to memory yet, so `loadInFlightCheckpointMessages`
-			// surfaces several intermediate assistant messages from the
-			// checkpoint blob. The snapshot was paired with a middle
-			// message via timestamp matching, while a later message
-			// (with no tree of its own) carries the latest text. Dedupe
-			// must transfer the agentTree forward so the confirmation
-			// card in the snapshot tree survives.
+		it('should keep the snapshot tree when dedupe collapses intra-turn assistant rows', () => {
+			// Simulates the in-flight HITL case: the turn has produced several
+			// assistant rows, and the snapshot was paired with a middle one via
+			// timestamp matching, while a later row (with no tree of its own)
+			// carries the latest text. Dedupe must transfer the agentTree
+			// forward so the confirmation card in the snapshot tree survives.
 			const snapshotTree: InstanceAiAgentNode = {
 				agentId: 'agent-001',
 				role: 'orchestrator',
@@ -575,55 +780,6 @@ describe('parseStoredMessages', () => {
 			// Tree from the snapshot is transferred onto the kept message.
 			expect(assistant.agentTree).toBe(snapshotTree);
 			expect(assistant.agentTree?.toolCalls[0].confirmation?.requestId).toBe('req-live');
-		});
-
-		it('should apply renderHint correctly for known tool names', () => {
-			const messages: StoredAgentMessage[] = [
-				{
-					id: 'msg-u',
-					role: 'user',
-					content: 'Go',
-					createdAt: makeDate(),
-				},
-				{
-					id: 'msg-a',
-					role: 'assistant',
-					content: [
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-1',
-							toolName: 'delegate',
-							input: {},
-							state: 'resolved',
-							output: 'ok',
-						},
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-2',
-							toolName: 'build-workflow',
-							input: {},
-							state: 'resolved',
-							output: 'ok',
-						},
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-3',
-							toolName: 'plan',
-							input: {},
-							state: 'resolved',
-							output: 'ok',
-						},
-					],
-					createdAt: makeDate(1),
-				},
-			];
-
-			const result = parseStoredMessages(messages);
-
-			const toolCalls = result[1].agentTree?.toolCalls ?? [];
-			expect(toolCalls[0].renderHint).toBe('delegate');
-			expect(toolCalls[1].renderHint).toBe('builder');
-			expect(toolCalls[2].renderHint).toBe('planner');
 		});
 	});
 
@@ -715,12 +871,10 @@ describe('parseStoredMessages', () => {
 		});
 	});
 
-	describe('multi-run conversational turn (planned-task follow-ups)', () => {
-		// Mirrors the real flow: user sends a message, orchestrator suspends at a
-		// HITL plan-approval, user approves, planned tasks dispatch a builder, the
-		// orchestrator restarts internally (skipped <planned-task-follow-up> user
-		// rows) for checkpoint and synthesize sub-runs, and a snapshot is saved
-		// per sub-run. Without messageGroupId propagation across the turn, the
+	describe('multi-run conversational turn (legacy planned-task follow-ups)', () => {
+		// Mirrors a stored legacy thread: the orchestrator restarted internally
+		// (skipped <planned-task-follow-up> user rows) for several sub-runs, and
+		// a snapshot was saved per sub-run. Without messageGroupId propagation across the turn, the
 		// intra-turn unpaired text rows survive the dedup loop and render as
 		// duplicates of the final snapshot's tree.textContent.
 		it('collapses intra-turn unpaired assistant rows into the final snapshot', () => {
@@ -750,7 +904,7 @@ describe('parseStoredMessages', () => {
 						{
 							type: 'tool-call',
 							toolCallId: 'toolu_plan',
-							toolName: 'plan',
+							toolName: 'workflows',
 							input: {},
 							state: 'resolved',
 							output: { result: 'Plan approved and 2 tasks dispatched.' },
@@ -964,39 +1118,8 @@ describe('parseStoredMessages', () => {
 
 			expect(result).toHaveLength(1);
 			expect(result[0].content).toBe('');
-			// No tool calls and no text → no agentTree
+			// No snapshot → no agentTree
 			expect(result[0].agentTree).toBeUndefined();
-		});
-
-		it('should extract tool calls from native parts', () => {
-			const messages: StoredAgentMessage[] = [
-				{
-					id: 'msg-u',
-					role: 'user',
-					content: 'test',
-					createdAt: makeDate(),
-				},
-				{
-					id: 'msg-a',
-					role: 'assistant',
-					content: [
-						{
-							type: 'tool-call',
-							toolCallId: 'tc-parts',
-							toolName: 'plan',
-							input: { goal: 'x' },
-							state: 'resolved',
-							output: 'done',
-						},
-					],
-					createdAt: makeDate(1),
-				},
-			];
-
-			const result = parseStoredMessages(messages);
-
-			expect(result[1].agentTree?.toolCalls).toHaveLength(1);
-			expect(result[1].agentTree?.toolCalls[0].toolCallId).toBe('tc-parts');
 		});
 	});
 });
@@ -1019,34 +1142,34 @@ describe('confirmation expiration helpers', () => {
 				reasoning: '',
 				toolCalls: requestIds.map((requestId, idx) => ({
 					toolCallId: `tc-${idx}`,
-					toolName: 'plan',
+					toolName: 'workflows',
 					args: {},
 					isLoading: true,
 					confirmation: {
 						requestId,
 						severity: 'info' as const,
 						message: '',
-						inputType: 'plan-review' as const,
+						inputType: 'approval' as const,
 					},
 				})),
 				children: [
 					{
-						agentId: 'agent-planner',
-						role: 'planner',
+						agentId: 'agent-delegate',
+						role: 'delegate',
 						status: 'completed',
 						textContent: '',
 						reasoning: '',
 						toolCalls: [
 							{
 								toolCallId: 'tc-sub',
-								toolName: 'submit-plan',
+								toolName: 'ask-user',
 								args: {},
 								isLoading: true,
 								confirmation: {
 									requestId: 'req-sub',
 									severity: 'info' as const,
 									message: '',
-									inputType: 'plan-review' as const,
+									inputType: 'approval' as const,
 								},
 							},
 						],
@@ -1088,7 +1211,7 @@ describe('confirmation expiration helpers', () => {
 		markExpiredConfirmations(messages, new Set());
 	});
 
-	/** Build a single assistant message carrying one plan-review confirmation
+	/** Build a single assistant message carrying one approval confirmation
 	 *  card, with overridable actionability fields. */
 	function makeCardMessage(
 		overrides: Partial<{ isLoading: boolean; confirmationStatus: 'approved' | 'denied' }>,
@@ -1110,7 +1233,7 @@ describe('confirmation expiration helpers', () => {
 				toolCalls: [
 					{
 						toolCallId: 'tc-0',
-						toolName: 'plan',
+						toolName: 'workflows',
 						args: {},
 						isLoading: overrides.isLoading ?? true,
 						...(overrides.confirmationStatus
@@ -1120,7 +1243,7 @@ describe('confirmation expiration helpers', () => {
 							requestId: 'req-resolved',
 							severity: 'info' as const,
 							message: '',
-							inputType: 'plan-review' as const,
+							inputType: 'approval' as const,
 						},
 					},
 				],
@@ -1130,9 +1253,9 @@ describe('confirmation expiration helpers', () => {
 		};
 	}
 
-	// Regression: a resolved plan card reloaded after the user approved/denied it
+	// Regression: a resolved card reloaded after the user approved/denied it
 	// has no pending-confirmation row (claim() deleted it), but that absence must
-	// NOT relabel the historical card as "Plan (expired)".
+	// NOT relabel the historical card as expired.
 	it('does not mark a settled (no longer loading) card expired even with no live row', () => {
 		const messages = [makeCardMessage({ isLoading: false })];
 		markExpiredConfirmations(messages, new Set());

@@ -16,6 +16,7 @@ import get from 'lodash/get';
 
 import { injectNDVStore } from '@/features/ndv/shared/ndv.store';
 import { useNodeHelpers } from '@/app/composables/useNodeHelpers';
+import { useAiGatewayStore } from '@/app/stores/aiGateway.store';
 import { useI18n } from '@n8n/i18n';
 
 import { N8nButton, N8nOption, N8nSelect, N8nText } from '@n8n/design-system';
@@ -40,6 +41,7 @@ const props = defineProps<Props>();
 const ndvStore = injectNDVStore();
 const i18n = useI18n();
 const nodeHelpers = useNodeHelpers();
+const aiGatewayStore = useAiGatewayStore();
 
 const activeNode = computed(() => ndvStore.value.activeNode);
 
@@ -131,10 +133,13 @@ const filteredOptions = computed(() => {
 	return props.parameter.options.filter((option) => {
 		// Accept both INodeProperties and INodePropertyCollection
 		if (isINodeProperties(option)) {
-			return displayNodeParameter(option);
+			return (
+				displayNodeParameter(option) &&
+				!aiGatewayStore.isNodePropertyHidden(activeNode.value, option.name)
+			);
 		}
 		if (isINodePropertyCollection(option)) {
-			return true; // Collections are always displayed
+			return !aiGatewayStore.isNodePropertyHidden(activeNode.value, option.name);
 		}
 		return false;
 	});
@@ -227,7 +232,7 @@ function valueChanged(parameterData: IUpdateInformation) {
 				<N8nButton
 					v-if="(parameter.options ?? []).length === 1"
 					style="width: 100%"
-					variant="subtle"
+					variant="outline"
 					:label="getPlaceholderText"
 					data-test-id="collection-parameter-add"
 					@click="optionSelected(parameter.options![0].name)"

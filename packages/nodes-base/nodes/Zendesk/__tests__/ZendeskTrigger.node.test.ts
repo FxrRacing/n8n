@@ -1,4 +1,5 @@
 import type { IHookFunctions } from 'n8n-workflow';
+import { requestPath } from 'n8n-workflow';
 import { ZendeskTrigger } from '../ZendeskTrigger.node';
 import * as GenericFunctions from '../GenericFunctions';
 import * as ZendeskTriggerHelpers from '../ZendeskTriggerHelpers';
@@ -32,11 +33,11 @@ describe('ZendeskTrigger Node', () => {
 		let webhookData: Record<string, any>;
 
 		beforeEach(() => {
-			jest.clearAllMocks();
+			vi.clearAllMocks();
 			webhookData = {};
 			mockThis = {
 				getNodeWebhookUrl: () => 'https://example.com/webhook',
-				getNodeParameter: jest.fn().mockImplementation((name: string) => {
+				getNodeParameter: vi.fn().mockImplementation((name: string) => {
 					if (name === 'service') return 'support';
 					if (name === 'conditions')
 						return { all: [{ field: 'status', operation: 'is', value: 'open' }] };
@@ -52,8 +53,7 @@ describe('ZendeskTrigger Node', () => {
 			const signingSecretResponse = { signing_secret: { secret: 'test-signing-secret' } };
 			const createdTrigger = { id: 'trigger-456' };
 
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest')
 				.mockResolvedValueOnce({ webhook: createdWebhook }) // POST /webhooks
 				.mockResolvedValueOnce(signingSecretResponse) // GET /webhooks/{id}/signing_secret
 				.mockResolvedValueOnce({ trigger: createdTrigger }); // POST /triggers
@@ -72,7 +72,7 @@ describe('ZendeskTrigger Node', () => {
 			const signingSecretResponse = { signing_secret: { secret: 'secret-123' } };
 			const createdTrigger = { id: 'trigger-101' };
 
-			const apiRequestSpy = jest
+			const apiRequestSpy = vi
 				.spyOn(GenericFunctions, 'zendeskApiRequest')
 				.mockResolvedValueOnce({ webhook: createdWebhook })
 				.mockResolvedValueOnce(signingSecretResponse)
@@ -81,7 +81,10 @@ describe('ZendeskTrigger Node', () => {
 			const trigger = new ZendeskTrigger();
 			await trigger.webhookMethods.default.create.call(mockThis);
 
-			expect(apiRequestSpy).toHaveBeenCalledWith('GET', '/webhooks/webhook-789/signing_secret');
+			expect(apiRequestSpy).toHaveBeenCalledWith(
+				'GET',
+				requestPath`/webhooks/webhook-789/signing_secret`,
+			);
 		});
 
 		it('should reuse the existing Zendesk webhook and skip POST /webhooks when targetId is already stored', async () => {
@@ -89,7 +92,7 @@ describe('ZendeskTrigger Node', () => {
 			const signingSecretResponse = { signing_secret: { secret: 'reused-secret' } };
 			const createdTrigger = { id: 'trigger-789' };
 
-			const apiRequestSpy = jest
+			const apiRequestSpy = vi
 				.spyOn(GenericFunctions, 'zendeskApiRequest')
 				.mockResolvedValueOnce(signingSecretResponse) // GET /webhooks/{id}/signing_secret
 				.mockResolvedValueOnce({ trigger: createdTrigger }); // POST /triggers
@@ -104,7 +107,7 @@ describe('ZendeskTrigger Node', () => {
 
 			// POST /webhooks must not be called when a webhook already exists
 			const postWebhookCalls = apiRequestSpy.mock.calls.filter(
-				([method, path]) => method === 'POST' && path === '/webhooks',
+				([method, path]) => method === 'POST' && String(path) === '/webhooks',
 			);
 			expect(postWebhookCalls).toHaveLength(0);
 		});
@@ -115,7 +118,7 @@ describe('ZendeskTrigger Node', () => {
 		let mockThis: any;
 
 		beforeEach(() => {
-			jest.clearAllMocks();
+			vi.clearAllMocks();
 			webhookData = {
 				webhookId: 'trigger-123',
 				targetId: 'webhook-456',
@@ -128,11 +131,10 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should delete webhook data including secret when deletion succeeds', async () => {
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest')
 				.mockResolvedValueOnce({}) // DELETE /triggers
 				.mockResolvedValueOnce({}); // DELETE /webhooks
-			jest.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([]); // no remaining triggers → webhook can be deleted
+			vi.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([]); // no remaining triggers → webhook can be deleted
 
 			const trigger = new ZendeskTrigger();
 			const result = await trigger.webhookMethods.default.delete.call(mockThis);
@@ -144,9 +146,7 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should return false when deletion fails', async () => {
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
-				.mockRejectedValueOnce(new Error('API error'));
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest').mockRejectedValueOnce(new Error('API error'));
 
 			const trigger = new ZendeskTrigger();
 			const result = await trigger.webhookMethods.default.delete.call(mockThis);
@@ -155,9 +155,9 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should clear static data even when the API call fails, so the next activation does not try to reuse a deleted webhook', async () => {
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
-				.mockRejectedValueOnce(new Error('404 Not Found'));
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest').mockRejectedValueOnce(
+				new Error('404 Not Found'),
+			);
 
 			const trigger = new ZendeskTrigger();
 			await trigger.webhookMethods.default.delete.call(mockThis);
@@ -170,10 +170,10 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should not delete the Zendesk webhook when a sibling trigger still references it, so the duplicate workflow keeps receiving events', async () => {
-			const apiRequestSpy = jest
+			const apiRequestSpy = vi
 				.spyOn(GenericFunctions, 'zendeskApiRequest')
 				.mockResolvedValueOnce({}); // DELETE /triggers
-			jest.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([
+			vi.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([
 				// A sibling trigger still points at the same webhook
 				{
 					actions: [{ field: 'notification_webhook', value: [webhookData.targetId, '{}'] }],
@@ -187,8 +187,7 @@ describe('ZendeskTrigger Node', () => {
 
 			// DELETE /webhooks must not have been called
 			const deleteWebhookCalls = apiRequestSpy.mock.calls.filter(
-				([method, path]) =>
-					method === 'DELETE' && typeof path === 'string' && path.startsWith('/webhooks'),
+				([method, path]) => method === 'DELETE' && String(path).startsWith('/webhooks'),
 			);
 			expect(deleteWebhookCalls).toHaveLength(0);
 		});
@@ -196,11 +195,11 @@ describe('ZendeskTrigger Node', () => {
 
 	describe('checkExists webhook method', () => {
 		beforeEach(() => {
-			jest.clearAllMocks();
+			vi.clearAllMocks();
 		});
 
 		it('should return false and clear stale IDs when the webhook is not found in Zendesk, so create() starts fresh instead of reusing a deleted webhook', async () => {
-			jest.spyOn(GenericFunctions, 'zendeskApiRequest').mockResolvedValueOnce({
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest').mockResolvedValueOnce({
 				webhooks: [{ id: 'other-id', endpoint: 'https://other.example.com' }],
 			});
 
@@ -220,10 +219,10 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should return false without fetching triggers on first activation, so create() registers a trigger for the existing webhook without an unnecessary API call', async () => {
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
-				.mockResolvedValueOnce({ webhooks: [matchingWebhook] });
-			const allItemsSpy = jest.spyOn(GenericFunctions, 'zendeskApiRequestAllItems');
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest').mockResolvedValueOnce({
+				webhooks: [matchingWebhook],
+			});
+			const allItemsSpy = vi.spyOn(GenericFunctions, 'zendeskApiRequestAllItems');
 
 			const webhookData: Record<string, unknown> = {};
 			const trigger = new ZendeskTrigger();
@@ -239,10 +238,10 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should return true when both the webhook and our trigger are confirmed in Zendesk, so create() is skipped and the existing setup is preserved', async () => {
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
-				.mockResolvedValueOnce({ webhooks: [matchingWebhook] });
-			jest.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([ownTrigger]);
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest').mockResolvedValueOnce({
+				webhooks: [matchingWebhook],
+			});
+			vi.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([ownTrigger]);
 
 			const webhookData: Record<string, unknown> = {
 				targetId: ZENDESK_WEBHOOK_ID,
@@ -260,10 +259,10 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should return false and clear the stale trigger ID when the webhook exists but our trigger is gone, so create() makes a new trigger without being blocked by the invalid ID', async () => {
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
-				.mockResolvedValueOnce({ webhooks: [matchingWebhook] });
-			jest.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([]);
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest').mockResolvedValueOnce({
+				webhooks: [matchingWebhook],
+			});
+			vi.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([]);
 
 			const webhookData: Record<string, unknown> = {
 				targetId: ZENDESK_WEBHOOK_ID,
@@ -281,12 +280,12 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it("should not issue any DELETE calls for triggers it does not own, so a duplicated workflow cannot silently destroy the original workflow's Zendesk trigger", async () => {
-			const apiRequestSpy = jest
+			const apiRequestSpy = vi
 				.spyOn(GenericFunctions, 'zendeskApiRequest')
 				.mockResolvedValueOnce({ webhooks: [matchingWebhook] });
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequestAllItems')
-				.mockResolvedValueOnce([siblingTrigger]);
+			vi.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([
+				siblingTrigger,
+			]);
 
 			// Our stored webhookId is different from the sibling's trigger ID
 			const webhookData: Record<string, unknown> = {
@@ -302,10 +301,10 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should not match a trigger whose action field is not notification_webhook, so unrelated Zendesk triggers with coincidental IDs are never treated as ours', async () => {
-			jest
-				.spyOn(GenericFunctions, 'zendeskApiRequest')
-				.mockResolvedValueOnce({ webhooks: [matchingWebhook] });
-			jest.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([
+			vi.spyOn(GenericFunctions, 'zendeskApiRequest').mockResolvedValueOnce({
+				webhooks: [matchingWebhook],
+			});
+			vi.spyOn(GenericFunctions, 'zendeskApiRequestAllItems').mockResolvedValueOnce([
 				// Same ID as our stored webhookId but wrong action type
 				{
 					id: ZENDESK_TRIGGER_ID,
@@ -338,24 +337,24 @@ describe('ZendeskTrigger Node', () => {
 
 			mockThis = {
 				getWorkflowStaticData: () => webhookData,
-				getResponseObject: jest.fn().mockReturnValue({
-					status: jest.fn().mockReturnThis(),
-					send: jest.fn().mockReturnThis(),
-					end: jest.fn(),
+				getResponseObject: vi.fn().mockReturnValue({
+					status: vi.fn().mockReturnThis(),
+					send: vi.fn().mockReturnThis(),
+					end: vi.fn(),
 				}),
-				getRequestObject: jest.fn().mockReturnValue({
+				getRequestObject: vi.fn().mockReturnValue({
 					body: { ticket: { id: '123' } },
 					rawBody: '{"ticket":{"id":"123"}}',
 				}),
-				getHeaderData: jest.fn().mockReturnValue({}),
+				getHeaderData: vi.fn().mockReturnValue({}),
 				helpers: {
-					returnJsonArray: jest.fn().mockImplementation((data) => [data]),
+					returnJsonArray: vi.fn().mockImplementation((data) => [data]),
 				},
 			};
 		});
 
 		it('should reject with 401 when signature verification fails', async () => {
-			jest.spyOn(ZendeskTriggerHelpers, 'verifySignature').mockReturnValueOnce(false);
+			vi.spyOn(ZendeskTriggerHelpers, 'verifySignature').mockReturnValueOnce(false);
 
 			const trigger = new ZendeskTrigger();
 			const result = await trigger.webhook.call(mockThis);
@@ -368,7 +367,7 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should process webhook when signature verification succeeds', async () => {
-			jest.spyOn(ZendeskTriggerHelpers, 'verifySignature').mockReturnValueOnce(true);
+			vi.spyOn(ZendeskTriggerHelpers, 'verifySignature').mockReturnValueOnce(true);
 
 			const trigger = new ZendeskTrigger();
 			const result = await trigger.webhook.call(mockThis);
@@ -378,7 +377,7 @@ describe('ZendeskTrigger Node', () => {
 		});
 
 		it('should return workflow data with the request body', async () => {
-			jest.spyOn(ZendeskTriggerHelpers, 'verifySignature').mockReturnValueOnce(true);
+			vi.spyOn(ZendeskTriggerHelpers, 'verifySignature').mockReturnValueOnce(true);
 
 			const trigger = new ZendeskTrigger();
 			const result = await trigger.webhook.call(mockThis);

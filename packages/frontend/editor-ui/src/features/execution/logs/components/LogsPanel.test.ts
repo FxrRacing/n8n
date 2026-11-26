@@ -1,4 +1,5 @@
 import { renderComponent } from '@/__tests__/render';
+import { moveResize, startResize } from '@/__tests__/resize';
 import { fireEvent, waitFor, within } from '@testing-library/vue';
 import { flushPromises } from '@vue/test-utils';
 import { mockedStore } from '@/__tests__/utils';
@@ -13,7 +14,7 @@ import {
 } from '@/app/stores/workflowDocument.store';
 import { useWorkflowExecutionStateStore } from '@/app/stores/workflowExecutionState.store';
 import type { IExecutionResponse } from '@/features/execution/executions/executions.types';
-import { computed, h, nextTick, ref, shallowRef } from 'vue';
+import { computed, h, nextTick, shallowRef } from 'vue';
 import {
 	aiAgentNode,
 	aiChatExecutionResponse as aiChatExecutionResponseTemplate,
@@ -23,9 +24,13 @@ import {
 	nodeTypes,
 } from '../__test__/data';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
-import { IN_PROGRESS_EXECUTION_ID } from '@/app/constants';
+import { IN_PROGRESS_EXECUTION_ID, LOGS_EXECUTION_DATA_THROTTLE_DURATION } from '@/app/constants';
 import { createExecutionDataId, useExecutionDataStore } from '@/app/stores/executionData.store';
-import { WorkflowDocumentStoreKey, WorkflowIdKey } from '@/app/constants/injectionKeys';
+import {
+	LogsPanelHostKey,
+	WorkflowDocumentStoreKey,
+	WorkflowIdKey,
+} from '@/app/constants/injectionKeys';
 import { useCanvasOperations } from '@/app/composables/useCanvasOperations';
 import { useNDVStore } from '@/features/ndv/shared/ndv.store';
 import { createRunExecutionData, deepCopy } from 'n8n-workflow';
@@ -35,12 +40,10 @@ import { useUIStore } from '@/app/stores/ui.store';
 import { LOGS_PANEL_STATE } from '../logs.constants';
 import { ChatOptionsSymbol, ChatSymbol } from '@n8n/chat/constants';
 import { userEvent } from '@testing-library/user-event';
-import type { ChatMessage } from '@n8n/chat/types';
-import * as useChatMessaging from '@/features/execution/logs/composables/useChatMessaging';
-import { useToast } from '@/app/composables/useToast';
+import { useToast } from '@n8n/composables/useToast';
 import type { IWorkflowDb } from '@/Interface';
 
-vi.mock('@/app/composables/useToast', () => {
+vi.mock('@n8n/composables/useToast', () => {
 	const showMessage = vi.fn();
 	const showError = vi.fn();
 	return {
@@ -67,11 +70,20 @@ vi.mock('@vueuse/core', async () => {
 	};
 });
 
-vi.mock('@/stores/pushConnection.store', () => ({
+vi.mock('@/app/stores/pushConnection.store', () => ({
 	usePushConnectionStore: vi.fn().mockReturnValue({
 		isConnected: true,
 	}),
 }));
+
+vi.mock('@/app/composables/useWorkflowId', async () => {
+	const { computed } = await import('vue');
+	const { useWorkflowsStore } = await import('@/app/stores/workflows.store');
+	return {
+		useWorkflowId: () => computed(() => useWorkflowsStore().workflowId),
+		useRouteWorkflowId: () => computed(() => useWorkflowsStore().workflowId),
+	};
+});
 
 describe('LogsPanel', () => {
 	const VIEWPORT_HEIGHT = 800;
@@ -101,11 +113,12 @@ describe('LogsPanel', () => {
 		).setWorkflowExecutionData(execution);
 	}
 
-	function render() {
+	function render(provide: Record<symbol, unknown> = {}) {
 		const wfId = workflowsStore.workflowId;
 		const wrapper = renderComponent(LogsPanel, {
 			global: {
 				provide: {
+					...provide,
 					[ChatSymbol as symbol]: {},
 					[ChatOptionsSymbol as symbol]: {},
 					[WorkflowIdKey as unknown as string]: computed(() => wfId),
@@ -174,6 +187,24 @@ describe('LogsPanel', () => {
 
 		expect(await rendered.findByTestId('logs-overview-header')).toBeInTheDocument();
 		expect(rendered.queryByTestId('logs-overview-empty')).not.toBeInTheDocument();
+	});
+
+	it('should size the panel relative to the container the host provides', async () => {
+		logsStore.toggleOpen(true);
+		setWorkflow(aiManualWorkflow);
+		const heightContainer = document.createElement('div');
+		Object.defineProperty(heightContainer, 'offsetHeight', { configurable: true, get: () => 600 });
+
+		render({
+			[LogsPanelHostKey as symbol]: {
+				context: 'artifact',
+				heightStorageKey: 'TEST_LOGS_PANEL_HEIGHT',
+				heightContainer,
+			},
+		});
+
+		// 30% of the 600px container. The 800px body would give 240px.
+		expect(logsStore.height).toBe(180);
 	});
 
 	it('should only render logs panel if the workflow has no chat trigger', async () => {
@@ -299,10 +330,13 @@ describe('LogsPanel', () => {
 		expect(logsStore.state).toBe(LOGS_PANEL_STATE.CLOSED);
 		expect(rendered.queryByTestId('logs-overview-body')).not.toBeInTheDocument();
 
-		await fireEvent.mouseDown(rendered.getByTestId('resize-handle'));
-
-		window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 0, clientY: 0 }));
-		window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: 0, clientY: 0 }));
+		await startResize(
+			rendered.getByTestId('resize-handle'),
+			{ height: 40 },
+			{ clientY: VIEWPORT_HEIGHT - 40 },
+		);
+		await moveResize({ clientY: 500 });
+		await fireEvent.mouseUp(window);
 
 		await waitFor(() => {
 			expect(logsStore.state).toBe(LOGS_PANEL_STATE.ATTACHED);
@@ -318,14 +352,13 @@ describe('LogsPanel', () => {
 		expect(logsStore.state).toBe(LOGS_PANEL_STATE.ATTACHED);
 		expect(rendered.queryByTestId('logs-overview-body')).toBeInTheDocument();
 
-		await fireEvent.mouseDown(rendered.getByTestId('resize-handle'));
-
-		window.dispatchEvent(
-			new MouseEvent('mousemove', { bubbles: true, clientX: 0, clientY: VIEWPORT_HEIGHT }),
+		await startResize(
+			rendered.getByTestId('resize-handle'),
+			{ height: 240 },
+			{ clientY: VIEWPORT_HEIGHT - 240 },
 		);
-		window.dispatchEvent(
-			new MouseEvent('mouseup', { bubbles: true, clientX: 0, clientY: VIEWPORT_HEIGHT }),
-		);
+		await moveResize({ clientY: VIEWPORT_HEIGHT });
+		await fireEvent.mouseUp(window);
 
 		await waitFor(() => {
 			expect(logsStore.state).toBe(LOGS_PANEL_STATE.CLOSED);
@@ -356,8 +389,15 @@ describe('LogsPanel', () => {
 		expect(rendered.getByText(/Running/)).toBeInTheDocument();
 		expect(rendered.queryByText('AI Agent')).not.toBeInTheDocument();
 
-		workflowsStore.addNodeExecutionStartedData({
+		// The run gets its id before node pushes arrive, as in the executionStarted handler.
+		const executionStateStore = useWorkflowExecutionStateStore(
+			createWorkflowDocumentId(workflowsStore.workflowId),
+		);
+		executionStateStore.promotePendingExecution('567');
+
+		useExecutionDataStore(createExecutionDataId('567')).addNodeExecutionStartedData({
 			nodeName: 'AI Agent',
+			sequenceNumber: 0,
 			executionId: '567',
 			data: { executionIndex: 0, startTime: Date.parse('2025-04-20T12:34:51.000Z'), source: [] },
 		});
@@ -374,9 +414,7 @@ describe('LogsPanel', () => {
 		expect(lastTreeItem.getByText('AI Agent')).toBeInTheDocument();
 		expect(lastTreeItem.getByText(/Running/)).toBeInTheDocument();
 
-		useExecutionDataStore(
-			createExecutionDataId(IN_PROGRESS_EXECUTION_ID),
-		).updateNodeExecutionStatus({
+		useExecutionDataStore(createExecutionDataId('567')).updateNodeExecutionStatus({
 			nodeName: 'AI Agent',
 			executionId: '567',
 			itemCountByConnectionType: { ai_agent: [1] },
@@ -395,8 +433,9 @@ describe('LogsPanel', () => {
 		expect(await lastTreeItem.findByText('Success')).toBeInTheDocument();
 		expect(lastTreeItem.getByText('in 33ms')).toBeInTheDocument();
 
+		executionStateStore.setActiveExecutionId(undefined);
 		setExecutionData({
-			...workflowsStore.workflowExecutionData!,
+			...useExecutionDataStore(createExecutionDataId('567')).getExecutionSnapshot()!,
 			id: '1234',
 			status: 'success',
 			finished: true,
@@ -455,6 +494,46 @@ describe('LogsPanel', () => {
 			expect(ndvStore.activeNodeName).toBe('AI Agent');
 			expect(ndvStore.output.run).toBe(0);
 		});
+	});
+
+	it('should open the renamed node after a rename while the run is pending', async () => {
+		const canvasOperations = useCanvasOperations();
+
+		logsStore.toggleOpen(true);
+		// Create deep copy so that renaming doesn't affect other test cases
+		const workflow = deepCopy(aiChatWorkflow);
+		workflow.id = 'pending-rename-workflow-id';
+		setWorkflow(workflow);
+		setExecutionData({
+			...aiChatExecutionResponse,
+			id: IN_PROGRESS_EXECUTION_ID,
+			status: 'running',
+			finished: false,
+			stoppedAt: undefined,
+		});
+
+		const rendered = render();
+		await rendered.findAllByRole('treeitem');
+
+		await canvasOperations.renameNode('AI Agent', 'Renamed Agent');
+
+		async function openFirstRow() {
+			vi.advanceTimersByTime(LOGS_EXECUTION_DATA_THROTTLE_DURATION + 1);
+			await flushPromises();
+			const agentRow = (await rendered.findAllByRole('treeitem'))[0];
+			await fireEvent.click(within(agentRow).getAllByLabelText('Open...')[0]);
+		}
+
+		await openFirstRow();
+		await waitFor(() => expect(ndvStore.activeNodeName).toBe('Renamed Agent'));
+
+		ndvStore.unsetActiveNodeName();
+		useWorkflowExecutionStateStore(createWorkflowDocumentId(workflow.id)).promotePendingExecution(
+			'exec-1',
+		);
+
+		await openFirstRow();
+		await waitFor(() => expect(ndvStore.activeNodeName).toBe('Renamed Agent'));
 	});
 
 	it('should toggle subtree when chevron icon button is pressed', async () => {
@@ -558,6 +637,27 @@ describe('LogsPanel', () => {
 			expect(await findByRole('treeitem', { selected: true })).toHaveTextContent(/AI Model/);
 		});
 
+		it('should handle arrow navigation without bubbling to canvas shortcuts', async () => {
+			const { getByTestId, findByRole } = render();
+			const overview = getByTestId('logs-overview');
+			const documentKeydown = vi.fn();
+			document.addEventListener('keydown', documentKeydown);
+
+			try {
+				await waitFor(async () =>
+					expect(await findByRole('treeitem', { selected: true })).toHaveTextContent(/AI Model/),
+				);
+				await fireEvent.keyDown(overview, { key: 'ArrowUp' });
+
+				expect(await findByRole('treeitem', { selected: true })).toHaveTextContent(/AI Agent/);
+				await fireEvent.keyDown(overview, { key: 'ArrowDown' });
+				expect(await findByRole('treeitem', { selected: true })).toHaveTextContent(/AI Model/);
+				expect(documentKeydown).not.toHaveBeenCalled();
+			} finally {
+				document.removeEventListener('keydown', documentKeydown);
+			}
+		});
+
 		it('should not select a log for the selected node on canvas if sync is disabled', async () => {
 			logsStore.toggleLogSelectionSync(false);
 
@@ -644,29 +744,6 @@ describe('LogsPanel', () => {
 		});
 
 		describe('session management', () => {
-			const mockMessages: ChatMessage[] = [
-				{
-					id: '1',
-					text: 'Existing message',
-					sender: 'user',
-				},
-			];
-
-			beforeEach(() => {
-				vi.spyOn(useChatMessaging, 'useChatMessaging').mockImplementation(
-					({ onNewMessage: addChatMessage }) => {
-						addChatMessage(mockMessages[0]);
-
-						return {
-							sendMessage: vi.fn(),
-							previousMessageIndex: ref(0),
-							isLoading: computed(() => false),
-							setLoadingState: vi.fn(),
-						};
-					},
-				);
-			});
-
 			it('should allow copying session ID', async () => {
 				const { getByTestId } = render();
 

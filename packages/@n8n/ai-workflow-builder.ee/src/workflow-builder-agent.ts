@@ -8,15 +8,14 @@ import type { MemorySaver, StateSnapshot } from '@langchain/langgraph';
 import { Command, GraphRecursionError } from '@langchain/langgraph';
 import type { SelectedNodeContext } from '@n8n/api-types';
 import type { Logger } from '@n8n/backend-common';
-import {
-	ApplicationError,
-	OperationalError,
-	type INodeTypeDescription,
-	type IRunExecutionData,
-	type ITelemetryTrackProperties,
-	type IWorkflowBase,
-	type NodeExecutionSchema,
+import type {
+	INodeTypeDescription,
+	IRunExecutionData,
+	ITelemetryTrackProperties,
+	IWorkflowBase,
+	NodeExecutionSchema,
 } from 'n8n-workflow';
+import { OperationalError, UserError } from '@n8n/errors';
 
 import { MAX_AI_BUILDER_PROMPT_LENGTH, MAX_MULTI_AGENT_STREAM_ITERATIONS } from '@/constants';
 
@@ -40,6 +39,7 @@ import type { HITLInterruptValue, PlanOutput } from './types/planning';
 import type { SimpleWorkflow } from './types/workflow';
 import { sanitizeLlmErrorMessage } from './utils/error-sanitizer';
 import { createStreamProcessor, type StreamEvent } from './utils/stream-processor';
+import { sanitizeWorkflowForBuilder } from './utils/workflow-sanitization';
 import type { WorkflowState } from './workflow-state';
 
 const PROMPT_IS_TOO_LARGE_ERROR =
@@ -108,7 +108,6 @@ export interface ExpressionValue {
 }
 
 export interface BuilderFeatureFlags {
-	templateExamples?: boolean;
 	/** Enable pin data generation in code builder (default: true). */
 	pinData?: boolean;
 	/** Enable introspection tool for diagnostic data collection. Disabled by default. */
@@ -197,18 +196,19 @@ export class WorkflowBuilderAgent {
 	async getState(workflowId?: string, userId?: string): Promise<TypedStateSnapshot> {
 		const workflow = this.createWorkflow();
 		const threadId = SessionManagerService.generateThreadId(workflowId, userId);
-		return (await workflow.getState({
+		return await workflow.getState({
 			configurable: { thread_id: threadId },
-		})) as TypedStateSnapshot;
+		});
 	}
 
 	private getDefaultWorkflowJSON(payload: ChatPayload): SimpleWorkflow {
-		return (
-			(payload.workflowContext?.currentWorkflow as SimpleWorkflow) ?? {
-				nodes: [],
-				connections: {},
-			}
-		);
+		const currentWorkflow = payload.workflowContext?.currentWorkflow as SimpleWorkflow | undefined;
+
+		if (!currentWorkflow) {
+			return { nodes: [], connections: {}, name: '' };
+		}
+
+		return sanitizeWorkflowForBuilder(currentWorkflow);
 	}
 
 	async *chat(
@@ -646,12 +646,12 @@ export class WorkflowBuilderAgent {
 
 		// If it's not an abort error, check for GraphRecursionError
 		if (error instanceof GraphRecursionError) {
-			throw new ApplicationError(WORKFLOW_TOO_COMPLEX_ERROR);
+			throw new UserError(WORKFLOW_TOO_COMPLEX_ERROR);
 		}
 
 		// Check for 401 expired token errors (typically from long-running generations)
 		if (this.isTokenExpiredError(error)) {
-			throw new ApplicationError(WORKFLOW_TOO_COMPLEX_ERROR);
+			throw new UserError(WORKFLOW_TOO_COMPLEX_ERROR);
 		}
 
 		// Re-throw any other errors

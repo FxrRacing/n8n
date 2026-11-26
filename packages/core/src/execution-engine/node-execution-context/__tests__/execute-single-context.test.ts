@@ -13,7 +13,8 @@ import type {
 	ICredentialDataDecryptedObject,
 	WorkflowExpression,
 } from 'n8n-workflow';
-import { ApplicationError, NodeConnectionTypes } from 'n8n-workflow';
+import { NodeConnectionTypes } from 'n8n-workflow';
+import { UnexpectedError } from '@n8n/errors';
 import { mock } from 'vitest-mock-extended';
 
 import { describeCommonTests } from './shared-tests';
@@ -107,6 +108,28 @@ describe('ExecuteSingleContext', () => {
 			expect(executeSingleContext.getInputData(inputIndex, connectionType)).toEqual(expectedData);
 		});
 
+		it('should read input data from a map without a prototype', () => {
+			const inputDataWithoutPrototype = { ...inputData };
+			Object.setPrototypeOf(inputDataWithoutPrototype, null);
+			const context = new ExecuteSingleContext(
+				workflow,
+				node,
+				additionalData,
+				mode,
+				runExecutionData,
+				runIndex,
+				connectionInputData,
+				inputDataWithoutPrototype,
+				itemIndex,
+				executeData,
+				abortSignal,
+			);
+
+			expect(context.getInputData(inputIndex, connectionType)).toEqual(
+				inputData.main[inputIndex]?.[itemIndex],
+			);
+		});
+
 		it('should return an empty object if the input name does not exist', () => {
 			const connectionType = 'nonExistent' as typeof NodeConnectionTypes.Main;
 			const expectedData = { json: {} };
@@ -118,7 +141,7 @@ describe('ExecuteSingleContext', () => {
 			const inputIndex = 1;
 
 			expect(() => executeSingleContext.getInputData(inputIndex, connectionType)).toThrow(
-				ApplicationError,
+				UnexpectedError,
 			);
 		});
 
@@ -126,7 +149,7 @@ describe('ExecuteSingleContext', () => {
 			inputData.main[inputIndex] = null;
 
 			expect(() => executeSingleContext.getInputData(inputIndex, connectionType)).toThrow(
-				ApplicationError,
+				UnexpectedError,
 			);
 		});
 
@@ -134,7 +157,7 @@ describe('ExecuteSingleContext', () => {
 			delete inputData.main[inputIndex]![itemIndex];
 
 			expect(() => executeSingleContext.getInputData(inputIndex, connectionType)).toThrow(
-				ApplicationError,
+				UnexpectedError,
 			);
 		});
 	});
@@ -197,29 +220,6 @@ describe('ExecuteSingleContext', () => {
 				'last',
 				'params',
 			]);
-		});
-	});
-
-	describe('getRuntimeCredential', () => {
-		beforeEach(() => {
-			additionalData.getRuntimeCredential.mockReset();
-		});
-
-		it('forwards the alias to the additionalData callback and returns its value', async () => {
-			additionalData.getRuntimeCredential.mockResolvedValue('Bearer xyz');
-
-			const result = await executeSingleContext.getRuntimeCredential('api_key');
-
-			expect(result).toBe('Bearer xyz');
-			expect(additionalData.getRuntimeCredential).toHaveBeenCalledWith(runExecutionData, 'api_key');
-		});
-
-		it('returns undefined when the underlying callback yields undefined', async () => {
-			additionalData.getRuntimeCredential.mockResolvedValue(undefined);
-
-			const result = await executeSingleContext.getRuntimeCredential('missing');
-
-			expect(result).toBeUndefined();
 		});
 	});
 });

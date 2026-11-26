@@ -1,18 +1,25 @@
 <script lang="ts" setup>
-import { N8nIcon } from '@n8n/design-system';
+import { N8nIcon, N8nText } from '@n8n/design-system';
 import { useI18n, type BaseTextKey } from '@n8n/i18n';
 import { onUnmounted, ref } from 'vue';
-import { useTelemetry } from '@/app/composables/useTelemetry';
+import { useTelemetry } from '@n8n/composables/useTelemetry';
+import { useTemplatesStore } from '@/features/workflows/templates/templates.store';
 import { type WorkflowPreviewSuggestion } from '../suggestions';
+import type { InstanceAiPrefillDeclaration } from '@/features/ai/instanceAi/prefills';
 
-const PREVIEW_HOVER_DELAY_MS = 300;
+const PREVIEW_HOVER_DELAY_MS = 30;
 
-const props = defineProps<{
-	suggestions: readonly WorkflowPreviewSuggestion[];
-	disabled: boolean;
-}>();
+const props = withDefaults(
+	defineProps<{
+		suggestions: readonly WorkflowPreviewSuggestion[];
+		disabled: boolean;
+		/** Optional label shown above the row. */
+		label?: string;
+	}>(),
+	{ label: undefined },
+);
 
-interface SubmitSuggestionPayload {
+interface InsertSuggestionPayload extends InstanceAiPrefillDeclaration {
 	promptKey: BaseTextKey;
 	suggestionId: string;
 	suggestionKind: 'prompt';
@@ -21,12 +28,13 @@ interface SubmitSuggestionPayload {
 
 const emit = defineEmits<{
 	'preview-change': [promptKey: BaseTextKey | null];
-	'submit-suggestion': [payload: SubmitSuggestionPayload];
+	'insert-suggestion': [payload: InsertSuggestionPayload];
 	'workflow-preview': [workflowFile: string | null];
 }>();
 
 const i18n = useI18n();
 const telemetry = useTelemetry();
+const templatesStore = useTemplatesStore();
 const activePreview = ref<string | null>(null);
 let hoverTimer: ReturnType<typeof setTimeout> | null = null;
 const hoverStartTimes = new Map<string, number>();
@@ -88,12 +96,17 @@ function handleSuggestionClick(suggestion: WorkflowPreviewSuggestion) {
 	});
 
 	clearPreview();
-	emit('submit-suggestion', {
+	emit('insert-suggestion', {
 		promptKey: suggestion.promptKey,
 		suggestionId: suggestion.id,
 		suggestionKind: 'prompt',
 		position,
+		prefillType: 'suggestion_catalog',
 	});
+}
+
+function handleSeeAllClick() {
+	telemetry.track('AI Assistant examples see all button clicked');
 }
 
 onUnmounted(clearPreview);
@@ -101,6 +114,15 @@ onUnmounted(clearPreview);
 
 <template>
 	<div :class="$style.suggestions" data-test-id="instance-ai-workflow-preview-suggestions">
+		<N8nText
+			v-if="props.label"
+			size="small"
+			color="text-light"
+			:class="$style.assistantLabel"
+			data-test-id="instance-ai-workflow-preview-suggestions-assistant-label"
+		>
+			{{ props.label }}
+		</N8nText>
 		<div :class="$style.suggestionRow">
 			<button
 				v-for="(suggestion, index) in props.suggestions"
@@ -123,10 +145,11 @@ onUnmounted(clearPreview);
 				<span>{{ i18n.baseText(suggestion.labelKey) }}</span>
 			</button>
 			<a
-				href="https://n8n.io/workflows/"
+				:href="templatesStore.websiteTemplateRepositoryURL"
 				target="_blank"
 				rel="noopener noreferrer"
 				:class="$style.seeAllLink"
+				@click="handleSeeAllClick"
 			>
 				<span>{{
 					i18n.baseText(
@@ -144,6 +167,12 @@ onUnmounted(clearPreview);
 
 .suggestions {
 	width: 100%;
+}
+
+.assistantLabel {
+	display: block;
+	text-align: center;
+	margin-bottom: var(--spacing--2xs);
 }
 
 .suggestionRow {

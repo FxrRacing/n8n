@@ -1,17 +1,19 @@
+import { isCloudBrowserResourceDecision } from './cloudBrowserAgents';
 import type { PendingConfirmationItem } from './instanceAi.store';
 
 /**
  * Decides whether a pending confirmation belongs in the floating slot (takes
  * over the chat input) or the inline list (renders in the chat flow).
  *
- * Floating: single-click approvals + domain/web-search access.
- * Inline: questions, plan-review, text, setup, credential, gateway
- *   resource-decision, continue.
+ * Floating: structured questions, single-click approvals, domain/web-search access,
+ *   and cloud browser resource-decisions.
+ * Inline: text, setup, credential, other gateway resource-decisions,
+ *   continue, channel setup.
  *
  * Items are inline-by-presence: if `setupRequests` / `credentialRequests` /
- * `credentialFlow` is set, the panel renders a setup or credential card
- * regardless of `inputType`. Otherwise `inputType` drives the choice; an
- * absent or `'approval'` `inputType` falls through to floating.
+ * `credentialFlow` / `channelConfig` / `testListener` is set, the panel renders
+ * a setup, credential, channel, or test-listener card regardless of `inputType`. Otherwise `inputType` drives the
+ * choice; an absent or `'approval'` `inputType` falls through to floating.
  */
 export function isPendingItemFloating(item: PendingConfirmationItem): boolean {
 	const conf = item.toolCall.confirmation;
@@ -19,14 +21,18 @@ export function isPendingItemFloating(item: PendingConfirmationItem): boolean {
 	if (conf.setupRequests?.length) return false;
 	if (conf.credentialRequests?.length) return false;
 	if (conf.credentialFlow) return false;
+	if (conf.channelConfig) return false;
+	if (conf.testListener) return false;
+	if (conf.appBlueprint) return false;
 
 	switch (conf.inputType) {
-		case 'questions':
-		case 'plan-review':
 		case 'text':
-		case 'resource-decision':
 		case 'continue':
+		case 'app-blueprint':
 			return false;
+		case 'resource-decision':
+			return isCloudBrowserResourceDecision(item);
+		case 'questions':
 		case 'approval':
 		case undefined:
 			return true;

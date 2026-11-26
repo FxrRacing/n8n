@@ -1,9 +1,8 @@
 import { useI18n } from '@n8n/i18n';
-import { useNodeHelpers } from '@/app/composables/useNodeHelpers';
 import { useRunWorkflow } from '@/app/composables/useRunWorkflow';
 import { VIEWS } from '@/app/constants';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
-import { useWorkflowExecutionStateStore } from '@/app/stores/workflowExecutionState.store';
+import { injectWorkflowExecutionStateStore } from '@/app/stores/workflowExecutionState.store';
 import { injectWorkflowDocumentStore } from '@/app/stores/workflowDocument.store';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import MessageWithButtons from '@n8n/chat/components/MessageWithButtons.vue';
@@ -45,13 +44,10 @@ export function useChatState(
 	const locale = useI18n();
 	const workflowsStore = useWorkflowsStore();
 	const workflowDocumentStore = injectWorkflowDocumentStore();
-	const workflowExecutionState = computed(() =>
-		useWorkflowExecutionStateStore(workflowDocumentStore.value.documentId),
-	);
+	const workflowExecutionState = injectWorkflowExecutionStateStore();
 	const rootStore = useRootStore();
 	const logsStore = useLogsStore();
 	const router = useRouter();
-	const nodeHelpers = useNodeHelpers();
 	const nodeTypesStore = useNodeTypesStore();
 	const pushConnectionStore = usePushConnectionStore();
 	const { runWorkflow } = useRunWorkflow({ router });
@@ -322,7 +318,7 @@ export function useChatState(
 
 	const restoredChatMessages = computed(() =>
 		restoreChatHistory(
-			workflowsStore.workflowExecutionData,
+			workflowExecutionState.value.activeExecution,
 			locale.baseText('chat.window.chat.response.empty'),
 			locale.baseText('chat.window.chat.response.redacted'),
 		),
@@ -330,7 +326,6 @@ export function useChatState(
 
 	function refreshSession() {
 		workflowExecutionState.value.setWorkflowExecutionData(null);
-		nodeHelpers.updateNodesExecutionIssues();
 		logsStore.resetChatSessionId();
 		logsStore.resetMessages();
 		// Clear partial execution destination to allow full workflow execution

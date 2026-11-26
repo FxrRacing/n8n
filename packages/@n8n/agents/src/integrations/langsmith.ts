@@ -1,7 +1,6 @@
+import { ensureContextManager } from '../sdk/context-manager';
 import { Telemetry } from '../sdk/telemetry';
 import type { BuiltTelemetry, OpaqueTracer, OpaqueTracerProvider } from '../types/telemetry';
-
-let registeredOtelContext = false;
 
 const LANGSMITH_TRACEABLE = 'langsmith.traceable';
 const LANGSMITH_IS_ROOT = 'langsmith.is_root';
@@ -125,19 +124,28 @@ function isTraceableSpan(span: OtelSpanLike): boolean {
 	);
 }
 
+/**
+ * Upper bound on concurrently tracked traces in the span processor. The
+ * provider is process-lived, so a trace whose spans never end would otherwise
+ * keep its bookkeeping forever. Evicting the oldest trace only degrades
+ * parent resolution for that trace's later spans — they still export (see
+ * the onEnd fallback), just without a resolved traceable parent.
+ */
+const MAX_TRACKED_TRACES = 1_000;
+
 function createLangSmithSpanProcessor(options: {
 	exporter: unknown;
 	BatchSpanProcessor: BatchSpanProcessorConstructor;
 	RunTree: LangSmithRunTree;
 }): SpanProcessorLike {
 	const delegate = new options.BatchSpanProcessor(options.exporter);
-	const traceMap: Record<
+	const traceMap = new Map<
 		string,
 		{
 			spanCount: number;
 			spanInfo: Record<string, { isTraceable: boolean; parentSpanId?: string }>;
 		}
-	> = {};
+	>();
 
 	return {
 		async forceFlush() {
@@ -151,12 +159,16 @@ function createLangSmithSpanProcessor(options: {
 			}
 
 			const spanContext = span.spanContext();
-			traceMap[spanContext.traceId] ??= {
-				spanCount: 0,
-				spanInfo: {},
-			};
-
-			const traceInfo = traceMap[spanContext.traceId];
+			let traceInfo = traceMap.get(spanContext.traceId);
+			if (!traceInfo) {
+				traceInfo = { spanCount: 0, spanInfo: {} };
+				traceMap.set(spanContext.traceId, traceInfo);
+				while (traceMap.size > MAX_TRACKED_TRACES) {
+					const oldestTraceId = traceMap.keys().next().value;
+					if (oldestTraceId === undefined) break;
+					traceMap.delete(oldestTraceId);
+				}
+			}
 			traceInfo.spanCount++;
 			const traceable = isTraceableSpan(span);
 			const parentSpanId = getParentSpanId(span);
@@ -195,13 +207,20 @@ function createLangSmithSpanProcessor(options: {
 			}
 
 			const spanContext = span.spanContext();
-			const traceInfo = traceMap[spanContext.traceId];
+			const traceInfo = traceMap.get(spanContext.traceId);
 			const spanInfo = traceInfo?.spanInfo[spanContext.spanId];
-			if (!traceInfo || !spanInfo) return;
+			if (!traceInfo || !spanInfo) {
+				// Trace bookkeeping was evicted (see MAX_TRACKED_TRACES): the span's
+				// attributes were already stamped in onStart, so it can still export.
+				if (isTraceableSpan(span)) {
+					delegate.onEnd(span);
+				}
+				return;
+			}
 
 			traceInfo.spanCount--;
 			if (traceInfo.spanCount <= 0) {
-				delete traceMap[spanContext.traceId];
+				traceMap.delete(spanContext.traceId);
 			}
 
 			if (spanInfo.isTraceable) {
@@ -251,7 +270,6 @@ async function createLangSmithTracer(
 			spanProcessors?: unknown[];
 		}) => OpaqueTracerProvider & {
 			getTracer(name: string): OpaqueTracer;
-			register(config?: { propagator?: null }): void;
 		};
 	};
 
@@ -303,16 +321,10 @@ async function createLangSmithTracer(
 		RunTree,
 	});
 
+	await ensureContextManager();
 	const provider = new NodeTracerProvider({
 		spanProcessors: [processor],
 	});
-	if (!registeredOtelContext) {
-		// AI SDK creates nested operation/provider/tool spans through the active
-		// OpenTelemetry context. Without the Node context manager these spans are
-		// exported as separate root traces even when an explicit tracer is passed.
-		provider.register({ propagator: null });
-		registeredOtelContext = true;
-	}
 
 	return { tracer: provider.getTracer('@n8n/agents'), provider };
 }
@@ -333,7 +345,7 @@ async function createLangSmithTracer(
  *   .recordOutputs(false);
  *
  * const agent = new Agent('assistant')
- *   .model('anthropic/claude-sonnet-4-5')
+ *   .model('anthropic/claude-sonnet-5-5')
  *   .telemetry(telemetry)
  *   .instructions('...');
  * ```
@@ -370,7 +382,10 @@ export class LangSmithTelemetry extends Telemetry {
 		const built = await super.build();
 
 		// Attach the provider for flush/shutdown (parent build sets it from
-		// otlpEndpoint but not from .tracer(), so we add it here).
-		return { ...built, provider };
+		// otlpEndpoint but not from .tracer(), so we add it here). Mark this
+		// telemetry as LangSmith-flavored regardless of whether the caller
+		// declared a `.credential()` — many callers rely on the
+		// `LANGSMITH_API_KEY` env var instead and never call it.
+		return { ...built, provider, isLangSmith: true };
 	}
 }

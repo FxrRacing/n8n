@@ -1,9 +1,9 @@
 import type { Logger } from '@n8n/backend-common';
-import type { AuthIdentity, AuthIdentityRepository, User, UserRepository } from '@n8n/db';
-import { mock } from 'jest-mock-extended';
+import type { AuthIdentity, AuthIdentityRepository, Person, PersonRepository } from '@n8n/db';
+import { mock } from 'vitest-mock-extended';
 
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import type { JwtService } from '@/services/jwt.service';
+import { ForbiddenError } from '@n8n/errors';
+import type { JwtService } from '@n8n/backend-services';
 
 import type { FxrSsoEffectiveConfig, FxrSsoSettingsService } from '../fxr-sso-settings.service';
 import { claimsFromIdToken, emailDomainAllowed, FxrSsoService } from '../fxr-sso.service';
@@ -44,19 +44,19 @@ describe('FxrSsoService.resolveUser', () => {
 		managedByEnv: false,
 	};
 	const settings = mock<FxrSsoSettingsService>();
-	const userRepository = mock<UserRepository>();
+	const personRepository = mock<PersonRepository>();
 	const authIdentityRepository = mock<AuthIdentityRepository>();
 	const service = new FxrSsoService(
 		settings,
 		mock<Logger>(),
-		userRepository,
+		personRepository,
 		authIdentityRepository,
 		mock<JwtService>(),
 	);
 	const claims = { sub: 'sub-1', email: 'dev@fxrracing.com', givenName: 'Dev', familyName: 'Fxr' };
 
 	beforeEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 		settings.getEffective.mockResolvedValue({ ...effective });
 	});
 
@@ -68,18 +68,20 @@ describe('FxrSsoService.resolveUser', () => {
 	});
 
 	it('returns the user already linked to the subject', async () => {
-		const user = mock<User>({ id: 'u1', disabled: false });
-		authIdentityRepository.findOne.mockResolvedValue(mock<AuthIdentity>({ user }));
+		const user = mock<Person>({ id: 'u1', disabled: false });
+		authIdentityRepository.findOne.mockResolvedValue(mock<AuthIdentity>({ userId: 'u1' }));
+		personRepository.findByIdWithRole.mockResolvedValue(user);
 
 		const resolved = await service.resolveUser(claims);
 		expect(resolved.id).toBe('u1');
-		expect(userRepository.findOne).not.toHaveBeenCalled();
+		expect(personRepository.findByIdWithRole).toHaveBeenCalledWith('u1');
+		expect(personRepository.findByEmailWithAuthIdentities).not.toHaveBeenCalled();
 	});
 
 	it('links the subject to an existing user found by email', async () => {
 		authIdentityRepository.findOne.mockResolvedValue(null);
-		const user = mock<User>({ id: 'u2', disabled: false });
-		userRepository.findOne.mockResolvedValue(user);
+		const user = mock<Person>({ id: 'u2', disabled: false });
+		personRepository.findByEmailWithAuthIdentities.mockResolvedValue(user);
 
 		await expect(service.resolveUser(claims)).resolves.toBe(user);
 		expect(authIdentityRepository.save).toHaveBeenCalledWith(
@@ -89,17 +91,19 @@ describe('FxrSsoService.resolveUser', () => {
 
 	it('refuses disabled users', async () => {
 		authIdentityRepository.findOne.mockResolvedValue(null);
-		userRepository.findOne.mockResolvedValue(mock<User>({ id: 'u3', disabled: true }));
+		personRepository.findByEmailWithAuthIdentities.mockResolvedValue(
+			mock<Person>({ id: 'u3', disabled: true }),
+		);
 
 		await expect(service.resolveUser(claims)).rejects.toThrow(ForbiddenError);
 	});
 
 	it('refuses unknown users when auto-provisioning is off', async () => {
 		authIdentityRepository.findOne.mockResolvedValue(null);
-		userRepository.findOne.mockResolvedValue(null);
+		personRepository.findByEmailWithAuthIdentities.mockResolvedValue(null);
 		settings.getEffective.mockResolvedValue({ ...effective, autoProvision: false });
 
 		await expect(service.resolveUser(claims)).rejects.toThrow(ForbiddenError);
-		expect(userRepository.createUserWithProject).not.toHaveBeenCalled();
+		expect(personRepository.createPersonWithProject).not.toHaveBeenCalled();
 	});
 });

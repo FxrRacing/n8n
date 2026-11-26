@@ -14,7 +14,6 @@ const MIGRATION_NAME = 'CreateAgentHistoryTable1784000000011';
 
 describe('CreateAgentHistoryTable Migration', () => {
 	let dataSource: DataSource;
-	jest.setTimeout(20_000);
 
 	async function withContext<T>(fn: (context: TestMigrationContext) => Promise<T>): Promise<T> {
 		const context = createTestMigrationContext(dataSource);
@@ -163,7 +162,7 @@ describe('CreateAgentHistoryTable Migration', () => {
 					agentId: publishedAgentId,
 					publishedFromVersionId: publishedVersionId,
 					publishedById: userId,
-					schema: { name: 'Published Agent', model: 'anthropic/claude-sonnet-4-5' },
+					schema: { name: 'Published Agent', model: 'anthropic/claude-sonnet-5-5' },
 				});
 			});
 
@@ -384,7 +383,7 @@ describe('CreateAgentHistoryTable Migration', () => {
 					agentId: publishedAgentId,
 					publishedFromVersionId: publishedVersionId,
 					publishedById: userId,
-					schema: { name: 'Published Agent', model: 'anthropic/claude-sonnet-4-5' },
+					schema: { name: 'Published Agent', model: 'anthropic/claude-sonnet-5-5' },
 				});
 			});
 

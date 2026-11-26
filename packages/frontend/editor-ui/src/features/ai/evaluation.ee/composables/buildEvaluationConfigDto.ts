@@ -7,6 +7,7 @@ import type {
 
 import {
 	CANNED_METRICS,
+	getCanonicalEvaluationName,
 	LLM_JUDGE_METRIC_KEYS,
 	LM_SUBNODE_TYPE_TO_CHATHUB_PROVIDER,
 	type CannedMetricKey,
@@ -60,7 +61,7 @@ export function buildEvaluationConfigDto(input: BuildDtoInput): BuildDtoResult {
 	return {
 		ok: true,
 		dto: {
-			name: `Evaluation: ${input.workflowName}`.slice(0, 128),
+			name: getCanonicalEvaluationName(input.workflowName),
 			startNodeName: input.startNodeName,
 			endNodeName: input.endNodeName,
 			metrics,
@@ -87,6 +88,12 @@ function buildMetric(key: CannedMetricKey, name: string, input: BuildDtoInput): 
 	const datasetCol = (col: string) =>
 		`={{ $('${upstream}').first().json[${JSON.stringify(col)}] }}`;
 	const endOutputAsString = `={{ JSON.stringify($('${endNode}').first().json) }}`;
+
+	// Mirror of extractAnswerText() in evaluation.utils.ts — keep the two in sync.
+	// Prefer output > text > response; else single-key value; else JSON.stringify.
+	// Object values are JSON.stringified (not coerced to "[object Object]") so the
+	// runtime score matches the previewed answer exactly.
+	const endAnswer = `={{ (() => { const j = $('${endNode}').first().json; if (j === null || j === undefined) return ''; if (typeof j !== 'object') return String(j); const p = j.output ?? j.text ?? j.response; if (p !== undefined && p !== null) return typeof p === 'object' ? JSON.stringify(p) : String(p); const ks = Object.keys(j); if (ks.length === 1) { const o = j[ks[0]]; return typeof o === 'object' && o !== null ? JSON.stringify(o) : String(o); } return JSON.stringify(j); })() }}`;
 
 	if (LLM_JUDGE_METRIC_KEYS.has(key)) {
 		const selection = input.judgeSelectionByMetric[key];
@@ -161,7 +168,7 @@ function buildMetric(key: CannedMetricKey, name: string, input: BuildDtoInput): 
 				type: 'string_similarity',
 				config: {
 					inputs: {
-						actualAnswer: endOutputAsString,
+						actualAnswer: endAnswer,
 						expectedAnswer: datasetCol('expectedAnswer'),
 					},
 				},
@@ -177,7 +184,7 @@ function buildMetric(key: CannedMetricKey, name: string, input: BuildDtoInput): 
 				type: 'categorization',
 				config: {
 					inputs: {
-						actualAnswer: endOutputAsString,
+						actualAnswer: endAnswer,
 						expectedAnswer: datasetCol('expectedAnswer'),
 					},
 				},

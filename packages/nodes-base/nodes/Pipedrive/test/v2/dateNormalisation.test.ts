@@ -5,30 +5,31 @@ import { execute as activityUpdateExecute } from '../../v2/actions/activity/upda
 import { execute as dealCreateExecute } from '../../v2/actions/deal/create.operation';
 import { execute as dealUpdateExecute } from '../../v2/actions/deal/update.operation';
 import { pipedriveApiRequest, pipedriveGetCustomProperties } from '../../v2/transport';
+import type { Mock } from 'vitest';
 
-jest.mock('../../v2/transport', () => ({
-	pipedriveApiRequest: { call: jest.fn() },
-	pipedriveApiRequestAllItemsCursor: { call: jest.fn() },
-	pipedriveApiRequestAllItemsOffset: { call: jest.fn() },
-	pipedriveGetCustomProperties: { call: jest.fn() },
+vi.mock('../../v2/transport', () => ({
+	pipedriveApiRequest: { call: vi.fn() },
+	pipedriveApiRequestAllItemsCursor: { call: vi.fn() },
+	pipedriveApiRequestAllItemsOffset: { call: vi.fn() },
+	pipedriveGetCustomProperties: { call: vi.fn() },
 }));
 
-const mockApiRequest = pipedriveApiRequest as unknown as { call: jest.Mock };
-const mockGetCustomProperties = pipedriveGetCustomProperties as unknown as { call: jest.Mock };
+const mockApiRequest = pipedriveApiRequest as unknown as { call: Mock };
+const mockGetCustomProperties = pipedriveGetCustomProperties as unknown as { call: Mock };
 
 function buildContext(params: Record<string, unknown>): IExecuteFunctions {
 	return {
-		getInputData: jest.fn(() => [{ json: {} }]),
-		getNodeParameter: jest.fn((name: string, _i?: number, defaultValue?: unknown) => {
+		getInputData: vi.fn(() => [{ json: {} }]),
+		getNodeParameter: vi.fn((name: string, _i?: number, defaultValue?: unknown) => {
 			if (Object.prototype.hasOwnProperty.call(params, name)) return params[name];
 			return defaultValue;
 		}),
-		continueOnFail: jest.fn(() => false),
+		continueOnFail: vi.fn(() => false),
 		helpers: {
-			returnJsonArray: jest.fn((data: unknown) => (Array.isArray(data) ? data : [data])),
-			constructExecutionMetaData: jest.fn((items: unknown) => items),
+			returnJsonArray: vi.fn((data: unknown) => (Array.isArray(data) ? data : [data])),
+			constructExecutionMetaData: vi.fn((items: unknown) => items),
 		},
-		getNode: jest.fn(() => ({})),
+		getNode: vi.fn(() => ({})),
 	} as unknown as IExecuteFunctions;
 }
 
@@ -56,7 +57,7 @@ describe('Pipedrive v2 normalises ISO date inputs to YYYY-MM-DD on outgoing requ
 			IDataObject,
 		];
 		expect(method).toBe('POST');
-		expect(endpoint).toBe('/deals');
+		expect(String(endpoint)).toBe('/deals');
 		expect(body.expected_close_date).toBe('2026-04-13');
 	});
 
@@ -76,7 +77,7 @@ describe('Pipedrive v2 normalises ISO date inputs to YYYY-MM-DD on outgoing requ
 			IDataObject,
 		];
 		expect(method).toBe('PATCH');
-		expect(endpoint).toBe('/deals/10');
+		expect(String(endpoint)).toBe('/deals/10');
 		expect(body.expected_close_date).toBe('2026-04-13');
 	});
 
@@ -98,7 +99,7 @@ describe('Pipedrive v2 normalises ISO date inputs to YYYY-MM-DD on outgoing requ
 			IDataObject,
 		];
 		expect(method).toBe('POST');
-		expect(endpoint).toBe('/activities');
+		expect(String(endpoint)).toBe('/activities');
 		expect(body.due_date).toBe('2026-04-01');
 	});
 
@@ -118,7 +119,7 @@ describe('Pipedrive v2 normalises ISO date inputs to YYYY-MM-DD on outgoing requ
 			IDataObject,
 		];
 		expect(method).toBe('PATCH');
-		expect(endpoint).toBe('/activities/10');
+		expect(String(endpoint)).toBe('/activities/10');
 		expect(body.due_date).toBe('2026-04-02');
 	});
 });

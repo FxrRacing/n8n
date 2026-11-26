@@ -4,7 +4,8 @@ import type { INodeUi, IUpdateInformation } from '@/Interface';
 import { ref, computed, onMounted } from 'vue';
 import { N8nButton, N8nInput, N8nInputLabel, N8nTooltip } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
-import { useToast } from '@/app/composables/useToast';
+import { useToast } from '@n8n/composables/useToast';
+import { useEditorContext } from '@/app/composables/useEditorContext';
 import { injectNDVStore } from '@/features/ndv/shared/ndv.store';
 import {
 	getParentNodes,
@@ -13,7 +14,7 @@ import {
 	getUpdatedTextareaValue,
 	getTextareaCursorPosition,
 } from '../../utils/buttonParameter.utils';
-import { useTelemetry } from '@/app/composables/useTelemetry';
+import { useTelemetry } from '@n8n/composables/useTelemetry';
 import DraggableTarget from '@/app/components/DraggableTarget.vue';
 
 import { propertyNameFromExpression } from '@/app/utils/mappingUtils';
@@ -52,14 +53,29 @@ const inputFieldMaxLength = computed(
 const buttonLabel = computed(
 	() => props.parameter.typeOptions?.buttonConfig?.label ?? props.parameter.displayName,
 );
-const isSubmitEnabled = computed(() => {
-	if (!hasExecutionData.value || !prompt.value || props.isReadOnly) return false;
+const { askAi } = useEditorContext();
+const isAiTransformButton = computed(() => {
+	const action = props.parameter.typeOptions?.buttonConfig?.action;
+	return typeof action === 'object' && action?.type === 'askAiCodeGeneration';
+});
+const disabledReason = computed(() => {
+	if (props.isReadOnly) return i18n.baseText('codeNodeEditor.askAi.readOnly');
+	if (isAiTransformButton.value && !askAi.value) {
+		return i18n.baseText('codeNodeEditor.askAi.unavailable');
+	}
+	if (!hasExecutionData.value) return i18n.baseText('codeNodeEditor.askAi.noInputData');
+	if (!prompt.value) return i18n.baseText('codeNodeEditor.askAi.noPrompt');
 
 	const maxlength = inputFieldMaxLength.value;
-	if (maxlength && prompt.value.length > maxlength) return false;
+	if (maxlength && prompt.value.length > maxlength) {
+		return i18n.baseText('codeNodeEditor.askAi.promptTooLong', {
+			interpolate: { maxLength: maxlength },
+		});
+	}
 
-	return true;
+	return '';
 });
+const isSubmitEnabled = computed(() => !disabledReason.value);
 const promptUpdated = computed(() => {
 	const lastPrompt = activeNode.value?.parameters[AI_TRANSFORM_CODE_GENERATED_FOR_PROMPT] as string;
 	if (!lastPrompt) return false;
@@ -112,6 +128,7 @@ async function onSubmit() {
 					workflowDocumentStore.value.documentId,
 					ndvStore.value.activeNode,
 					ndvStore.value.pushRef,
+					askAi.value,
 					5,
 				);
 				if (!updateInformation) return;
@@ -252,28 +269,18 @@ async function updateCursorPositionOnMouseMove(event: MouseEvent, activeDrop: bo
 			</DraggableTarget>
 		</div>
 		<div :class="$style.controls">
-			<N8nTooltip :disabled="isSubmitEnabled">
-				<div>
-					<N8nButton
-						variant="subtle"
-						:disabled="!isSubmitEnabled"
-						size="small"
-						:loading="isLoading"
-						@click="onSubmit"
-					>
-						{{ buttonLabel }}
-					</N8nButton>
-				</div>
-				<template #content>
-					<span
-						v-if="!hasExecutionData"
-						v-text="i18n.baseText('codeNodeEditor.askAi.noInputData')"
-					/>
-					<span
-						v-else-if="prompt.length === 0"
-						v-text="i18n.baseText('codeNodeEditor.askAi.noPrompt')"
-					/>
-				</template>
+			<N8nTooltip as-child :disabled="!disabledReason || isLoading">
+				<N8nButton
+					variant="outline"
+					:disabled="!isSubmitEnabled"
+					:focusable-when-disabled="!!disabledReason"
+					size="small"
+					:loading="isLoading"
+					@click="onSubmit"
+				>
+					{{ buttonLabel }}
+				</N8nButton>
+				<template #content>{{ disabledReason }}</template>
 			</N8nTooltip>
 		</div>
 	</div>
@@ -297,7 +304,7 @@ async function updateCursorPositionOnMouseMove(event: MouseEvent, activeDrop: bo
 }
 
 .intro {
-	font-weight: var(--font-weight--bold);
+	font-weight: var(--font-weight--medium);
 	font-size: var(--font-size--2xs);
 	color: var(--color--text--shade-1);
 	padding: var(--spacing--2xs) 0 0;

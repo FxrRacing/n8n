@@ -78,7 +78,7 @@ The module is enabled through the pipeline's module list (already added).
 1. Deploy, run `configure-sso.sh`, confirm the sign-in page shows "Continue with SSO (Microsoft)".
 2. Sign in as the owner's Microsoft account: expect link to existing owner user, no new user.
 3. Sign in as a colleague not yet in n8n: expect a new member user and personal project.
-4. Sign in with a non-FXR Microsoft account: expect redirect to `/signin?ssoError=sso_failed`.
+4. Sign in with a non-FXR Microsoft account: expect redirect to `/signin?ssoError=login-failed`.
 5. Disable a user in n8n, retry: refused.
 
 ## Out of scope

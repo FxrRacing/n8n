@@ -1,8 +1,9 @@
+import type { EventService } from '@n8n/backend-services';
 import { mockInstance, mockLogger } from '@n8n/backend-test-utils';
 import { GlobalConfig } from '@n8n/config';
-import type { ExecutionRepository } from '@n8n/db';
-import { mock } from 'jest-mock-extended';
+import { createDeferredPromise } from '@n8n/utils/promise/deferred-promise';
 import type { WorkflowExecuteMode as ExecutionMode } from 'n8n-workflow';
+import { mock } from 'vitest-mock-extended';
 
 import type { ConcurrencyQueueType } from '@/concurrency/concurrency-control.service';
 import {
@@ -11,7 +12,8 @@ import {
 	ConcurrencyControlService,
 } from '@/concurrency/concurrency-control.service';
 import { InvalidConcurrencyLimitError } from '@/errors/invalid-concurrency-limit.error';
-import type { EventService } from '@/events/event.service';
+import type { ExecutionCancelService } from '@/executions/execution-cancel.service';
+import { ProductionHold } from '@/memory-guard/production-hold';
 import type { License } from '@/license';
 import type { Telemetry } from '@/telemetry';
 
@@ -19,7 +21,7 @@ import { ConcurrencyQueue } from '../concurrency-queue';
 
 describe('ConcurrencyControlService', () => {
 	const logger = mockLogger();
-	const executionRepository = mock<ExecutionRepository>();
+	const executionCancelService = mock<ExecutionCancelService>();
 	const telemetry = mock<Telemetry>();
 	const eventService = mock<EventService>();
 	const globalConfig = mockInstance(GlobalConfig, {
@@ -38,9 +40,9 @@ describe('ConcurrencyControlService', () => {
 	// `getValue` returns `undefined` for the license-issued concurrency
 	// quota by default; the license-quota test overrides this to return a
 	// number so the resolver's middle branch fires.
-	const licenseGetValue = jest.fn().mockReturnValue(undefined);
+	const licenseGetValue = vi.fn().mockReturnValue(undefined);
 	const license = mock<License>({
-		getPlanName: jest.fn().mockReturnValue('Community'),
+		getPlanName: vi.fn().mockReturnValue('Community'),
 		getValue: licenseGetValue as never,
 	});
 
@@ -64,7 +66,7 @@ describe('ConcurrencyControlService', () => {
 		license.getPlanName.mockReturnValue('Community');
 		licenseGetValue.mockReturnValue(undefined);
 
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 	});
 
 	describe('constructor', () => {
@@ -82,11 +84,12 @@ describe('ConcurrencyControlService', () => {
 				 */
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
 
 				/**
@@ -116,11 +119,12 @@ describe('ConcurrencyControlService', () => {
 					 */
 					new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
 				} catch (error) {
 					/**
@@ -143,11 +147,12 @@ describe('ConcurrencyControlService', () => {
 			 */
 			const service = new ConcurrencyControlService(
 				logger,
-				executionRepository,
+				executionCancelService,
 				telemetry,
 				eventService,
 				globalConfig,
 				license,
+				new ProductionHold(eventService),
 			);
 
 			/**
@@ -171,11 +176,12 @@ describe('ConcurrencyControlService', () => {
 				 */
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
 
 				/**
@@ -198,11 +204,12 @@ describe('ConcurrencyControlService', () => {
 			 */
 			const service = new ConcurrencyControlService(
 				logger,
-				executionRepository,
+				executionCancelService,
 				telemetry,
 				eventService,
 				globalConfig,
 				license,
+				new ProductionHold(eventService),
 			);
 
 			/**
@@ -232,11 +239,12 @@ describe('ConcurrencyControlService', () => {
 
 			const service = new ConcurrencyControlService(
 				logger,
-				executionRepository,
+				executionCancelService,
 				telemetry,
 				eventService,
 				globalConfig,
 				license,
+				new ProductionHold(eventService),
 			);
 
 			// No eager queue — pending lazy resolution.
@@ -258,11 +266,12 @@ describe('ConcurrencyControlService', () => {
 
 			const service = new ConcurrencyControlService(
 				logger,
-				executionRepository,
+				executionCancelService,
 				telemetry,
 				eventService,
 				globalConfig,
 				license,
+				new ProductionHold(eventService),
 			);
 
 			// Fill the queue up to the cap. These first five pass through
@@ -300,11 +309,12 @@ describe('ConcurrencyControlService', () => {
 
 			const service = new ConcurrencyControlService(
 				logger,
-				executionRepository,
+				executionCancelService,
 				telemetry,
 				eventService,
 				globalConfig,
 				license,
+				new ProductionHold(eventService),
 			);
 
 			await service.throttle({ mode: 'evaluation', executionId: 'eval-1' });
@@ -327,11 +337,12 @@ describe('ConcurrencyControlService', () => {
 
 			const service = new ConcurrencyControlService(
 				logger,
-				executionRepository,
+				executionCancelService,
 				telemetry,
 				eventService,
 				globalConfig,
 				license,
+				new ProductionHold(eventService),
 			);
 
 			await service.throttle({ mode: 'evaluation', executionId: 'eval-1' });
@@ -363,13 +374,14 @@ describe('ConcurrencyControlService', () => {
 
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
-					const enqueueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'enqueue');
+					const enqueueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'enqueue');
 
 					/**
 					 * Act
@@ -393,13 +405,14 @@ describe('ConcurrencyControlService', () => {
 
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
-					const enqueueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'enqueue');
+					const enqueueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'enqueue');
 
 					/**
 					 * Act
@@ -421,13 +434,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const enqueueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'enqueue');
+				const enqueueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'enqueue');
 
 				/**
 				 * Act
@@ -452,13 +466,14 @@ describe('ConcurrencyControlService', () => {
 
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
-					const dequeueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'dequeue');
+					const dequeueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'dequeue');
 
 					/**
 					 * Act
@@ -482,13 +497,14 @@ describe('ConcurrencyControlService', () => {
 
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
-					const dequeueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'dequeue');
+					const dequeueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'dequeue');
 
 					/**
 					 * Act
@@ -510,13 +526,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const dequeueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'dequeue');
+				const dequeueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'dequeue');
 
 				/**
 				 * Act
@@ -541,13 +558,14 @@ describe('ConcurrencyControlService', () => {
 
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
-					const removeSpy = jest.spyOn(ConcurrencyQueue.prototype, 'remove');
+					const removeSpy = vi.spyOn(ConcurrencyQueue.prototype, 'remove');
 
 					/**
 					 * Act
@@ -571,13 +589,14 @@ describe('ConcurrencyControlService', () => {
 
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
-					const removeSpy = jest.spyOn(ConcurrencyQueue.prototype, 'remove');
+					const removeSpy = vi.spyOn(ConcurrencyQueue.prototype, 'remove');
 
 					/**
 					 * Act
@@ -599,13 +618,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const removeSpy = jest.spyOn(ConcurrencyQueue.prototype, 'remove');
+				const removeSpy = vi.spyOn(ConcurrencyQueue.prototype, 'remove');
 
 				/**
 				 * Act
@@ -631,18 +651,23 @@ describe('ConcurrencyControlService', () => {
 
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
 
-					jest
-						.spyOn(ConcurrencyQueue.prototype, 'getAll')
-						.mockReturnValueOnce(new Set(['1', '2', '3']));
+					vi.spyOn(ConcurrencyQueue.prototype, 'getAll').mockReturnValueOnce(
+						new Set(['1', '2', '3']),
+					);
 
-					const removeSpy = jest.spyOn(ConcurrencyQueue.prototype, 'remove');
+					const removeSpy = vi.spyOn(ConcurrencyQueue.prototype, 'remove');
+					executionCancelService.markAsCanceled.mockResolvedValue({
+						canceled: [],
+						recorded: Promise.resolve(),
+					});
 
 					/**
 					 * Act
@@ -655,8 +680,36 @@ describe('ConcurrencyControlService', () => {
 					expect(removeSpy).toHaveBeenNthCalledWith(1, '1');
 					expect(removeSpy).toHaveBeenNthCalledWith(2, '2');
 					expect(removeSpy).toHaveBeenNthCalledWith(3, '3');
+					expect(executionCancelService.markAsCanceled).toHaveBeenCalledWith(['1', '2', '3']);
 				},
 			);
+
+			it('should wait for the ledger rows of the canceled executions', async () => {
+				globalConfig.executions.concurrency.productionLimit = 2;
+				const service = new ConcurrencyControlService(
+					logger,
+					executionCancelService,
+					telemetry,
+					eventService,
+					globalConfig,
+					license,
+					new ProductionHold(eventService),
+				);
+				const rows = createDeferredPromise<undefined>();
+				executionCancelService.markAsCanceled.mockResolvedValue({
+					canceled: [],
+					recorded: rows.promise,
+				});
+
+				let removed = false;
+				const removing = service.removeAll(['1']).then(() => (removed = true));
+				await new Promise((resolve) => setImmediate(resolve));
+				expect(removed).toBe(false);
+
+				rows.resolve(undefined);
+				await removing;
+				expect(removed).toBe(true);
+			});
 		});
 
 		describe('get queue', () => {
@@ -672,11 +725,12 @@ describe('ConcurrencyControlService', () => {
 				 */
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
 				// @ts-expect-error Private property
 				const queue = service.getQueue('webhook');
@@ -700,11 +754,12 @@ describe('ConcurrencyControlService', () => {
 				 */
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
 				// @ts-expect-error Private property
 				const queue = service.getQueue('evaluation');
@@ -732,13 +787,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const enqueueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'enqueue');
+				const enqueueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'enqueue');
 
 				/**
 				 * Act
@@ -761,13 +817,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const enqueueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'enqueue');
+				const enqueueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'enqueue');
 
 				/**
 				 * Act
@@ -791,13 +848,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const dequeueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'dequeue');
+				const dequeueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'dequeue');
 
 				/**
 				 * Act
@@ -818,13 +876,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const dequeueSpy = jest.spyOn(ConcurrencyQueue.prototype, 'dequeue');
+				const dequeueSpy = vi.spyOn(ConcurrencyQueue.prototype, 'dequeue');
 
 				/**
 				 * Act
@@ -847,13 +906,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const removeSpy = jest.spyOn(ConcurrencyQueue.prototype, 'remove');
+				const removeSpy = vi.spyOn(ConcurrencyQueue.prototype, 'remove');
 
 				/**
 				 * Act
@@ -874,13 +934,14 @@ describe('ConcurrencyControlService', () => {
 
 				const service = new ConcurrencyControlService(
 					logger,
-					executionRepository,
+					executionCancelService,
 					telemetry,
 					eventService,
 					globalConfig,
 					license,
+					new ProductionHold(eventService),
 				);
-				const removeSpy = jest.spyOn(ConcurrencyQueue.prototype, 'remove');
+				const removeSpy = vi.spyOn(ConcurrencyQueue.prototype, 'remove');
 
 				/**
 				 * Act
@@ -911,11 +972,12 @@ describe('ConcurrencyControlService', () => {
 					globalConfig.deployment.type = 'cloud';
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
 
 					/**
@@ -946,11 +1008,12 @@ describe('ConcurrencyControlService', () => {
 					globalConfig.deployment.type = 'cloud';
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
 
 					/**
@@ -980,11 +1043,12 @@ describe('ConcurrencyControlService', () => {
 					globalConfig.deployment.type = 'cloud';
 					const service = new ConcurrencyControlService(
 						logger,
-						executionRepository,
+						executionCancelService,
 						telemetry,
 						eventService,
 						globalConfig,
 						license,
+						new ProductionHold(eventService),
 					);
 
 					/**
@@ -1003,6 +1067,95 @@ describe('ConcurrencyControlService', () => {
 					});
 				},
 			);
+		});
+	});
+
+	describe('production hold', () => {
+		let hold: ProductionHold;
+
+		beforeEach(() => {
+			hold = new ProductionHold(eventService);
+		});
+
+		const createService = () =>
+			new ConcurrencyControlService(
+				logger,
+				executionCancelService,
+				telemetry,
+				eventService,
+				globalConfig,
+				license,
+				hold,
+			);
+
+		/** Resolves with whether the throttled execution was let through. */
+		const isAdmitted = async (promise: Promise<void>) => {
+			let admitted = false;
+			void promise.then(() => {
+				admitted = true;
+			});
+			await new Promise(process.nextTick);
+			return admitted;
+		};
+
+		it.each<ExecutionMode>(['webhook', 'trigger', 'chat'])(
+			'should hold a new %s execution during a hold',
+			async (mode) => {
+				const service = createService();
+				hold.start();
+
+				const throttled = service.throttle({ mode, executionId: '1' });
+
+				expect(await isAdmitted(throttled)).toBe(false);
+				expect(service.has('1')).toBe(true);
+				expect(hold.heldCount).toBe(1);
+			},
+		);
+
+		it.each<ExecutionMode>(['manual', 'integrated', 'error', 'retry', 'cli', 'internal'])(
+			'should not hold a %s execution',
+			async (mode) => {
+				const service = createService();
+				hold.start();
+
+				expect(await isAdmitted(service.throttle({ mode, executionId: '1' }))).toBe(true);
+			},
+		);
+
+		it('should not let a held execution start when a running execution ends', async () => {
+			const service = createService();
+			await service.throttle({ mode: 'manual', executionId: '1' });
+			hold.start();
+			const held = service.throttle({ mode: 'webhook', executionId: '2' });
+
+			service.release({ mode: 'manual' });
+
+			expect(await isAdmitted(held)).toBe(false);
+		});
+
+		it('should give back the queue place of a removed held execution', async () => {
+			globalConfig.executions.concurrency.productionLimit = 1;
+			const service = createService();
+			hold.start();
+			void service.throttle({ mode: 'webhook', executionId: '1' });
+			const queued = service.throttle({ mode: 'webhook', executionId: '2' });
+			await new Promise(process.nextTick);
+
+			service.remove({ mode: 'webhook', executionId: '1' });
+			hold.end();
+			hold.admit(10);
+
+			expect(await isAdmitted(queued)).toBe(true);
+		});
+
+		it('should keep held executions held when disabled for shutdown', async () => {
+			const service = createService();
+			hold.start();
+			const throttled = service.throttle({ mode: 'webhook', executionId: '1' });
+
+			service.disable();
+
+			expect(await isAdmitted(throttled)).toBe(false);
 		});
 	});
 });

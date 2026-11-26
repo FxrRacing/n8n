@@ -1,4 +1,8 @@
-import { OnLifecycleEvent } from '@n8n/decorators';
+import { isGenAiAttributeKey } from '@n8n/ai-utilities/gen-ai';
+import { LicenseState, Logger } from '@n8n/backend-common';
+import { EventService } from '@n8n/backend-services';
+import { WorkflowRepository, type Project } from '@n8n/db';
+import { OnLifecycleEvent, OnPubSubEvent } from '@n8n/decorators';
 import type {
 	WorkflowExecuteBeforeContext,
 	WorkflowExecuteAfterContext,
@@ -6,13 +10,17 @@ import type {
 	NodeExecuteBeforeContext,
 	NodeExecuteAfterContext,
 } from '@n8n/decorators';
-import { LicenseState, Logger } from '@n8n/backend-common';
 import { Service } from '@n8n/di';
-import type { ICustomTelemetryTag, IWorkflowBase } from 'n8n-workflow';
+import type { ICustomTelemetryTag, IWorkflowBase, WorkflowExecuteMode } from 'n8n-workflow';
 
+import type { RelayEventMap } from '@/events/maps/relay.event-map';
+
+import { toExecutionIdentity } from './execution-identity';
 import { ExecutionLevelTracer } from './execution-level-tracer';
-import type { CustomAttributes } from './execution-level-tracer.types';
-import { OtelConfig } from './otel.config';
+import { buildNodeGenAiAttributes } from './gen-ai-attributes';
+import type { CustomAttributes, ProjectContext } from './execution-level-tracer.types';
+import { OtelSettingsService } from './otel-settings.service';
+import { OtelService } from './otel.service';
 import { TraceContextService } from './tracing-context';
 import { OwnershipService } from '../../services/ownership.service';
 
@@ -40,19 +48,41 @@ export class OtelLifecycleHandler {
 	constructor(
 		private readonly tracer: ExecutionLevelTracer,
 		private readonly traceContextService: TraceContextService,
-		private readonly config: OtelConfig,
+		private readonly otelService: OtelService,
+		private readonly otelSettingsService: OtelSettingsService,
 		private readonly ownershipService: OwnershipService,
+		private readonly workflowRepository: WorkflowRepository,
 		private readonly logger: Logger,
 		private readonly licenseState: LicenseState,
+		private readonly eventService: EventService,
 	) {}
 
-	private isPublishedWorkflow(workflow: IWorkflowBase): boolean {
-		return !!(workflow.activeVersionId ?? workflow.active);
+	init() {
+		this.eventService.on(
+			'execution-crashed',
+			async (event) => await this.onExecutionCrashed(event),
+		);
+	}
+
+	@OnPubSubEvent('reload-otel-config')
+	@OnPubSubEvent('pubsub-reconnected')
+	async onReloadOtelConfig(): Promise<void> {
+		await this.otelService.reloadSettings();
+	}
+
+	private shouldTrace(ctx: { type: string; mode: WorkflowExecuteMode }): boolean {
+		const { enabled, productionExecutionsOnly, includeNodeSpans } =
+			this.otelSettingsService.getSettings();
+		if (!enabled) return false;
+		if (productionExecutionsOnly && ctx.mode === 'manual') return false;
+		if ((ctx.type === 'nodeExecuteBefore' || ctx.type === 'nodeExecuteAfter') && !includeNodeSpans)
+			return false;
+		return true;
 	}
 
 	@OnLifecycleEvent('workflowExecuteBefore')
 	async onWorkflowStart(ctx: WorkflowExecuteBeforeContext): Promise<void> {
-		if (this.config.productionExecutionsOnly && !this.isPublishedWorkflow(ctx.workflow)) return;
+		if (!this.shouldTrace(ctx)) return;
 
 		const parentExecutionId = ctx.executionData?.parentExecution?.executionId;
 		const tracingContext = parentExecutionId
@@ -72,21 +102,27 @@ export class OtelLifecycleHandler {
 				return undefined;
 			});
 
+		// In queue mode, main runs this hook, not the resume hook, when a waiting execution resumes.
+		const savedIdentity = parentExecutionId
+			? undefined
+			: toExecutionIdentity(tracingContext?.identity);
+
 		const spanContext = this.tracer.startWorkflow({
 			executionId: ctx.executionId,
 			tracingContext,
-			project: project
-				? {
-						id: project.id,
-						customAttributes: this.buildProjectCustomAttributes(project.customTelemetryTags),
-					}
-				: undefined,
+			savedIdentity,
+			emitStartSpan: this.otelSettingsService.getSettings().emitWorkflowStartSpan,
+			project: this.buildProjectContext(project),
 			workflow: {
 				id: ctx.workflow.id,
-				name: ctx.workflow.name,
+				name: savedIdentity
+					? await this.getCurrentWorkflowName(ctx.workflow, ctx.executionId)
+					: ctx.workflow.name,
 				versionId: ctx.workflow.versionId,
 				nodeCount: ctx.workflow.nodes.length,
-				customAttributes: this.buildWorkflowCustomAttributes(ctx),
+				customAttributes: this.buildWorkflowCustomAttributes(
+					ctx.workflow.settings?.customTelemetryTags,
+				),
 			},
 		});
 
@@ -97,7 +133,7 @@ export class OtelLifecycleHandler {
 
 	@OnLifecycleEvent('workflowExecuteResume')
 	async onWorkflowResume(ctx: WorkflowExecuteResumeContext): Promise<void> {
-		if (this.config.productionExecutionsOnly && !this.isPublishedWorkflow(ctx.workflow)) return;
+		if (!this.shouldTrace(ctx)) return;
 
 		const previousWorkflowExecution = await this.traceContextService.get(ctx.executionId);
 
@@ -112,29 +148,32 @@ export class OtelLifecycleHandler {
 				return undefined;
 			});
 
-		this.tracer.startWorkflow({
+		const spanContext = this.tracer.startWorkflow({
 			executionId: ctx.executionId,
+			// Parent keeps the execution in one trace; the link is kept for consumers of
+			// `n8n.continuation.reason`.
+			tracingContext: previousWorkflowExecution,
 			linkTo: previousWorkflowExecution,
-			project: project
-				? {
-						id: project.id,
-						customAttributes: this.buildProjectCustomAttributes(project.customTelemetryTags),
-					}
-				: undefined,
+			savedIdentity: toExecutionIdentity(previousWorkflowExecution?.identity),
+			emitStartSpan: this.otelSettingsService.getSettings().emitWorkflowStartSpan,
+			project: this.buildProjectContext(project),
 			workflow: {
 				id: ctx.workflow.id,
-				name: ctx.workflow.name,
+				name: await this.getCurrentWorkflowName(ctx.workflow, ctx.executionId),
 				versionId: ctx.workflow.versionId,
 				nodeCount: ctx.workflow.nodes.length,
-				customAttributes: this.buildWorkflowCustomAttributes(ctx),
+				customAttributes: this.buildWorkflowCustomAttributes(
+					ctx.workflow.settings?.customTelemetryTags,
+				),
 			},
 		});
+
+		// A second wait must parent on this segment, not on the origin.
+		await this.traceContextService.persist(ctx.executionId, spanContext);
 	}
 
 	@OnLifecycleEvent('workflowExecuteAfter')
 	onWorkflowEnd(ctx: WorkflowExecuteAfterContext): void {
-		if (this.config.productionExecutionsOnly && !this.isPublishedWorkflow(ctx.workflow)) return;
-
 		this.tracer.endWorkflow({
 			executionId: ctx.executionId,
 			status: ctx.runData.status,
@@ -145,10 +184,34 @@ export class OtelLifecycleHandler {
 		});
 	}
 
+	async onExecutionCrashed(event: RelayEventMap['execution-crashed']): Promise<void> {
+		if (!this.shouldTrace({ type: 'executionCrashed', mode: event.mode })) return;
+		this.tracer.endCrashedWorkflow({
+			executionId: event.executionId,
+			workflowId: event.workflowId,
+			workflowName: event.workflowName,
+			workflowVersionId: event.workflowVersionId,
+			mode: event.mode,
+			retryOf: event.retryOf,
+			detector: event.detector,
+			startedAt: event.startedAt,
+			stoppedAt: event.stoppedAt,
+			tracingContext: event.tracingContext,
+			workflow: {
+				customAttributes: this.buildWorkflowCustomAttributes(event.workflowCustomTelemetryTags),
+			},
+			project: event.project
+				? {
+						id: event.project.id,
+						customAttributes: this.buildProjectCustomAttributes(event.project.customTelemetryTags),
+					}
+				: undefined,
+		});
+	}
+
 	@OnLifecycleEvent('nodeExecuteBefore')
 	onNodeStart(ctx: NodeExecuteBeforeContext): void {
-		if (this.config.productionExecutionsOnly && !this.isPublishedWorkflow(ctx.workflow)) return;
-		if (!this.config.includeNodeSpans) return;
+		if (!this.shouldTrace(ctx)) return;
 
 		const node = ctx.workflow.nodes.find((n) => n.name === ctx.nodeName);
 		if (!node) return;
@@ -156,13 +219,13 @@ export class OtelLifecycleHandler {
 		this.tracer.startNode({
 			executionId: ctx.executionId,
 			node,
+			emitStartSpan: this.otelSettingsService.getSettings().emitNodeStartSpan,
 		});
 	}
 
 	@OnLifecycleEvent('nodeExecuteAfter')
 	onNodeEnd(ctx: NodeExecuteAfterContext): void {
-		if (this.config.productionExecutionsOnly && !this.isPublishedWorkflow(ctx.workflow)) return;
-		if (!this.config.includeNodeSpans) return;
+		if (!this.shouldTrace(ctx)) return;
 
 		const node = ctx.workflow.nodes.find((n) => n.name === ctx.nodeName);
 		if (!node) return;
@@ -174,6 +237,12 @@ export class OtelLifecycleHandler {
 			outputItemCount: countOutputItems(ctx.taskData.data),
 			error: ctx.taskData.error ?? undefined,
 			customAttributes: this.buildNodeCustomAttributes(ctx),
+			genAiAttributes: buildNodeGenAiAttributes(
+				node,
+				ctx.taskData.metadata?.tracing,
+				ctx.executionData.resultData.runData,
+				ctx.workflow.connections,
+			),
 		});
 	}
 
@@ -182,9 +251,9 @@ export class OtelLifecycleHandler {
 	}
 
 	private buildWorkflowCustomAttributes(
-		ctx: WorkflowExecuteBeforeContext | WorkflowExecuteResumeContext,
+		customTelemetryTags: unknown,
 	): CustomAttributes | undefined {
-		const tags = getCustomTelemetryTags(ctx.workflow.settings?.customTelemetryTags);
+		const tags = getCustomTelemetryTags(customTelemetryTags);
 		if (!tags?.length) return;
 		if (!this.areCustomSpanAttributesLicensed()) return;
 
@@ -200,6 +269,37 @@ export class OtelLifecycleHandler {
 		if (Object.keys(customAttributes).length === 0) return;
 
 		return customAttributes;
+	}
+
+	// A later segment runs the workflow saved at the start, so its name can predate a rename.
+	private async getCurrentWorkflowName(
+		workflow: IWorkflowBase,
+		executionId: string,
+	): Promise<string> {
+		try {
+			const [current] = await this.workflowRepository.findByIds([workflow.id], {
+				fields: ['name'],
+			});
+			return current?.name ?? workflow.name;
+		} catch (error) {
+			this.logger.warn('Failed to fetch workflow name for OTEL span', {
+				workflowId: workflow.id,
+				executionId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return workflow.name;
+		}
+	}
+
+	private buildProjectContext(project: Project | undefined): ProjectContext | undefined {
+		if (!project) return undefined;
+
+		return {
+			id: project.id,
+			// Personal project names hold the owner's name and email.
+			name: project.type === 'team' ? project.name : undefined,
+			customAttributes: this.buildProjectCustomAttributes(project.customTelemetryTags),
+		};
 	}
 
 	private buildProjectCustomAttributes(
@@ -220,7 +320,9 @@ export class OtelLifecycleHandler {
 		if (!this.areCustomSpanAttributesLicensed()) return undefined;
 
 		return Object.fromEntries(
-			Object.entries(ctx.taskData.metadata.tracing).map(([key, value]) => [key, String(value)]),
+			Object.entries(ctx.taskData.metadata.tracing)
+				.filter(([key]) => !isGenAiAttributeKey(key))
+				.map(([key, value]) => [key, String(value)]),
 		);
 	}
 }

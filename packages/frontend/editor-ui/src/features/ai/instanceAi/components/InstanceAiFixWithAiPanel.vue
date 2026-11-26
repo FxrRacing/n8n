@@ -1,10 +1,15 @@
 <script setup lang="ts">
+import {
+	N8nButton,
+	N8nCard,
+	N8nIcon,
+	N8nText,
+	N8nAnimatedCollapsibleContent as AnimatedCollapsibleContent,
+} from '@n8n/design-system';
 import { computed, ref } from 'vue';
 import { useI18n } from '@n8n/i18n';
-import { N8nButton, N8nIcon, N8nText } from '@n8n/design-system';
 import { CollapsibleRoot, CollapsibleTrigger } from 'reka-ui';
 import ConfirmationFooter from './ConfirmationFooter.vue';
-import AnimatedCollapsibleContent from './AnimatedCollapsibleContent.vue';
 
 const props = withDefaults(
 	defineProps<{
@@ -35,7 +40,7 @@ const title = computed(() =>
 </script>
 
 <template>
-	<div :class="$style.root" role="alert" data-test-id="instance-ai-fix-with-ai-panel">
+	<N8nCard :class="$style.root" role="alert" data-test-id="instance-ai-fix-with-ai-panel">
 		<div :class="$style.header">
 			<N8nIcon icon="circle-x" size="medium" :class="$style.headerIcon" />
 			<N8nText bold tag="span" :class="$style.title">{{ title }}</N8nText>
@@ -76,11 +81,13 @@ const title = computed(() =>
 				{{ i18n.baseText('instanceAi.fixWithAi.button') }}
 			</N8nButton>
 		</ConfirmationFooter>
-	</div>
+	</N8nCard>
 </template>
 
 <style module lang="scss">
 .root {
+	padding: 0;
+	box-shadow: none;
 	border: var(--border);
 	border-radius: var(--radius--lg);
 	margin: var(--spacing--2xs) 0;

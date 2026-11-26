@@ -1,20 +1,82 @@
-import { toCredentialResolutionFailedError } from './credential-resolution-error';
-import type { CredentialMissingModeContext, CredentialResolution } from './credential.types';
+import type { CredentialResolution, CredentialResolutionFailure } from './credential.types';
+import type { CredentialMissingMode } from '../../n8n-packages.types';
+import { getRequirementConsumerIds } from '../../spec/requirement-consumers';
+import type {
+	PackageCredentialRequirement,
+	PackageRequirementConsumer,
+} from '../../spec/requirements.schema';
 
-export abstract class CredentialMissingModeHandler {
-	abstract handle(
-		result: CredentialResolution,
-		context: CredentialMissingModeContext,
-	): Promise<CredentialResolution>;
+export function canStubNotFoundFailure(failure: CredentialResolutionFailure): boolean {
+	return (
+		failure.kind === 'not_found' && failure.targetId === undefined && failure.type !== undefined
+	);
 }
 
-export class MustPreexistCredentialMissingModeHandler extends CredentialMissingModeHandler {
-	// eslint-disable-next-line @typescript-eslint/require-await -- async contract shared with the create-stubs handler, which performs DB writes
-	async handle(result: CredentialResolution): Promise<CredentialResolution> {
-		if (result.failures.length === 0) {
-			return result;
-		}
+/**
+ * Classifies which unresolved credential references block the import, per missing-mode
+ * policy. Read-only — never writes.
+ */
+const rescueStubbable = (resolution: CredentialResolution): CredentialResolutionFailure[] =>
+	resolution.failures.filter((failure) => !canStubNotFoundFailure(failure));
 
-		throw toCredentialResolutionFailedError(result.failures);
+/* eslint-disable @typescript-eslint/naming-convention -- API credential missing mode keys */
+const BLOCKING_FAILURES: Record<
+	CredentialMissingMode,
+	(resolution: CredentialResolution) => CredentialResolutionFailure[]
+> = {
+	'must-preexist': (resolution) => resolution.failures,
+	'create-stub': rescueStubbable,
+	'create-with-values': rescueStubbable,
+};
+/* eslint-enable @typescript-eslint/naming-convention */
+
+export function credentialBlockingFailures(
+	mode: CredentialMissingMode,
+	resolution: CredentialResolution,
+): CredentialResolutionFailure[] {
+	return BLOCKING_FAILURES[mode](resolution);
+}
+
+export function credentialsToStub(
+	mode: CredentialMissingMode,
+	resolution: CredentialResolution,
+): CredentialResolutionFailure[] {
+	if (!credentialMissingModeCreates(mode)) return [];
+
+	return [
+		...new Map(
+			resolution.failures
+				.filter((failure) => canStubNotFoundFailure(failure))
+				.map((failure) => [failure.sourceId, failure] as const),
+		).values(),
+	];
+}
+
+/** Whether the mode fills an unresolved reference by creating the credential. */
+export function credentialMissingModeCreates(mode: CredentialMissingMode): boolean {
+	return mode === 'create-stub' || mode === 'create-with-values';
+}
+
+/** Whether the mode seeds created credentials from the package's bundled expression data. */
+export function credentialMissingModeUsesPackageData(mode: CredentialMissingMode): boolean {
+	return mode === 'create-with-values';
+}
+
+/** Package consumer IDs that depend on one of the given credentials. */
+export function consumersBlockedByCredentials(
+	requirements: PackageCredentialRequirement[] | undefined,
+	sourceIds: ReadonlySet<string>,
+	kind: PackageRequirementConsumer['kind'],
+): Set<string> {
+	const blocked = new Set<string>();
+
+	for (const requirement of requirements ?? []) {
+		if (!sourceIds.has(requirement.id)) continue;
+
+		for (const sourceId of getRequirementConsumerIds(requirement, kind)) {
+			blocked.add(sourceId);
+		}
 	}
+
+	return blocked;
 }

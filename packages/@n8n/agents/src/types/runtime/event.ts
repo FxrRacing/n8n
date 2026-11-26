@@ -19,17 +19,56 @@ export interface SubAgentStartedPayload extends SubAgentLifecycleBase {
 }
 
 export interface SubAgentCompletedPayload extends SubAgentLifecycleBase {
-	status: 'completed' | 'failed' | 'suspended';
+	status: 'completed' | 'failed' | 'suspended' | 'cancelled';
 	startedAt: number;
 	finishedAt: number;
 	durationMs: number;
 	runId?: string;
 	/** The child run's memory thread id (`persistence.threadId`), so consumers can correlate or continue it. */
 	threadId?: string;
+	/** Effective child model id used for this delegation. */
+	model?: string;
 	usage?: SubAgentLifecycleUsage;
 	finishReason?: FinishReason;
 	error?: string;
 }
+
+/**
+ * Child stream chunks that may be forwarded live to the parent chat while a
+ * delegation runs. Args/results and nested sub-agent lifecycle are excluded
+ * so fan-out stays bounded.
+ */
+export type ForwardedChildChunk =
+	| { type: 'text-delta'; id: string; delta: string }
+	| { type: 'reasoning-start'; id: string }
+	| { type: 'reasoning-delta'; id: string; delta: string }
+	| { type: 'reasoning-end'; id: string }
+	| { type: 'tool-input-start'; toolCallId: string; toolName: string }
+	| {
+			type: 'tool-execution-start';
+			toolCallId: string;
+			toolName: string;
+			startTime: number;
+	  }
+	| {
+			type: 'tool-execution-end';
+			toolCallId: string;
+			toolName: string;
+			isError: boolean;
+			endTime: number;
+	  };
+
+export interface SubAgentChunkPayload extends SubAgentLifecycleBase {
+	chunk: ForwardedChildChunk;
+}
+
+export type ToolApprovalEventPayload = {
+	toolCallId: string;
+	toolName: string;
+} & (
+	| { phase: 'requested'; request: unknown }
+	| { phase: 'resolved'; response: { approved: boolean; reason?: string } }
+);
 
 export const enum AgentEvent {
 	AgentStart = 'agent_start',
@@ -38,8 +77,10 @@ export const enum AgentEvent {
 	TurnEnd = 'turn_end',
 	ToolExecutionStart = 'tool_execution_start',
 	ToolExecutionEnd = 'tool_execution_end',
+	ToolApproval = 'tool_approval',
 	SubAgentStarted = 'subagent_started',
 	SubAgentCompleted = 'subagent_completed',
+	SubAgentChunk = 'subagent_chunk',
 	Error = 'error',
 }
 
@@ -57,12 +98,19 @@ export type AgentEventData =
 			isError: boolean;
 	  }
 	| ({ type: AgentEvent.SubAgentStarted } & SubAgentStartedPayload)
+	| ({ type: AgentEvent.ToolApproval } & ToolApprovalEventPayload)
 	| ({ type: AgentEvent.SubAgentCompleted } & SubAgentCompletedPayload)
+	| ({ type: AgentEvent.SubAgentChunk } & SubAgentChunkPayload)
 	| {
 			type: AgentEvent.Error;
 			message: string;
 			error: unknown;
-			source?: 'observer' | 'reflector' | 'episodic-memory';
+			source?:
+				| 'observer'
+				| 'reflector'
+				| 'episodic-memory'
+				| 'input-persistence'
+				| 'turn-delta-persistence';
 	  };
 
 export type AgentEventHandler = (data: AgentEventData) => void;

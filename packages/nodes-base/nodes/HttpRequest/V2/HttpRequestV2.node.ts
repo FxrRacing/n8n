@@ -13,17 +13,22 @@ import type {
 import {
 	NodeApiError,
 	NodeOperationError,
-	sleep,
+	READ_ONLY_ANNOTATIONS,
 	removeCircularRefs,
 	NodeConnectionTypes,
+	getMcpAuthHeaders,
+	sleepUnlessExecutionCancelled,
 } from 'n8n-workflow';
 import type { Readable } from 'stream';
+
+import { applyTemplatedAuth } from '@utils/templated-auth';
 
 import type { IAuthDataSanitizeKeys } from '../GenericFunctions';
 import {
 	getAllowedDomains,
 	getOAuth2AdditionalParameters,
 	getSecrets,
+	removeRequestOptions,
 	replaceNullValues,
 	sanitizeUiMessage,
 } from '../GenericFunctions';
@@ -174,30 +179,37 @@ export class HttpRequestV2 implements INodeType {
 						{
 							name: 'DELETE',
 							value: 'DELETE',
+							annotations: { effect: 'write', destructive: true, idempotent: false },
 						},
 						{
 							name: 'GET',
 							value: 'GET',
+							annotations: READ_ONLY_ANNOTATIONS,
 						},
 						{
 							name: 'HEAD',
 							value: 'HEAD',
+							annotations: READ_ONLY_ANNOTATIONS,
 						},
 						{
 							name: 'OPTIONS',
 							value: 'OPTIONS',
+							annotations: READ_ONLY_ANNOTATIONS,
 						},
 						{
 							name: 'PATCH',
 							value: 'PATCH',
+							annotations: { effect: 'write', destructive: true, idempotent: false },
 						},
 						{
 							name: 'POST',
 							value: 'POST',
+							// POST can run arbitrary actions, so it keeps the restrictive default.
 						},
 						{
 							name: 'PUT',
 							value: 'PUT',
+							annotations: { effect: 'write', destructive: true, idempotent: true },
 						},
 					],
 					default: 'GET',
@@ -646,7 +658,9 @@ export class HttpRequestV2 implements INodeType {
 		let httpBearerAuth;
 		let httpDigestAuth;
 		let httpHeaderAuth;
+		let httpMultipleHeadersAuth;
 		let httpQueryAuth;
+		let httpTemplatedCustomAuth;
 		let oAuth1Api;
 		let oAuth2Api;
 		let nodeCredentialType;
@@ -670,9 +684,15 @@ export class HttpRequestV2 implements INodeType {
 				try {
 					httpHeaderAuth = await this.getCredentials('httpHeaderAuth');
 				} catch {}
+			} else if (genericAuthType === 'httpMultipleHeadersAuth') {
+				httpMultipleHeadersAuth = await this.getCredentials('httpMultipleHeadersAuth');
 			} else if (genericAuthType === 'httpQueryAuth') {
 				try {
 					httpQueryAuth = await this.getCredentials('httpQueryAuth');
+				} catch {}
+			} else if (genericAuthType === 'httpTemplatedCustomAuth') {
+				try {
+					httpTemplatedCustomAuth = await this.getCredentials('httpTemplatedCustomAuth');
 				} catch {}
 			} else if (genericAuthType === 'oAuth1Api') {
 				try {
@@ -696,7 +716,9 @@ export class HttpRequestV2 implements INodeType {
 			httpBearerAuth,
 			httpDigestAuth,
 			httpHeaderAuth,
+			httpMultipleHeadersAuth,
 			httpQueryAuth,
+			httpTemplatedCustomAuth,
 			oAuth1Api,
 			oAuth2Api,
 		]) {
@@ -786,7 +808,7 @@ export class HttpRequestV2 implements INodeType {
 				const batchSize: number =
 					(options.batchSize as number) > 0 ? (options.batchSize as number) : 1;
 				if (itemIndex % batchSize === 0) {
-					await sleep(options.batchInterval as number);
+					await sleepUnlessExecutionCancelled(this, options.batchInterval as number);
 				}
 			}
 
@@ -798,6 +820,7 @@ export class HttpRequestV2 implements INodeType {
 				uri: url,
 				gzip: true,
 				rejectUnauthorized: !this.getNodeParameter('allowUnauthorizedCerts', itemIndex, false),
+				sendCredentialsOnCrossOriginRedirect: true,
 				allowedDomains,
 			};
 
@@ -997,8 +1020,8 @@ export class HttpRequestV2 implements INodeType {
 					}
 				}
 			} else if (options.bodyContentType === 'raw') {
+				// Read the body as text. It is parsed below, and nothing here consumes a stream.
 				requestOptions.json = false;
-				requestOptions.useStream = true;
 			} else {
 				requestOptions.json = true;
 			}
@@ -1030,6 +1053,11 @@ export class HttpRequestV2 implements INodeType {
 				requestOptions.headers![httpHeaderAuth.name as string] = httpHeaderAuth.value;
 				authDataKeys.headers = [httpHeaderAuth.name as string];
 			}
+			if (httpMultipleHeadersAuth !== undefined) {
+				const headers = getMcpAuthHeaders('multipleHeadersAuth', httpMultipleHeadersAuth);
+				requestOptions.headers = { ...requestOptions.headers, ...headers };
+				authDataKeys.headers = Object.keys(headers);
+			}
 			if (httpQueryAuth !== undefined) {
 				if (!requestOptions.qs) {
 					requestOptions.qs = {};
@@ -1044,6 +1072,12 @@ export class HttpRequestV2 implements INodeType {
 					sendImmediately: false,
 				};
 				authDataKeys.auth = ['pass'];
+			}
+			if (httpTemplatedCustomAuth !== undefined) {
+				const templatedAuth = applyTemplatedAuth(httpTemplatedCustomAuth, requestOptions);
+				if (templatedAuth.headers) authDataKeys.headers = Object.keys(templatedAuth.headers);
+				if (templatedAuth.body) authDataKeys.body = Object.keys(templatedAuth.body);
+				if (templatedAuth.qs) authDataKeys.qs = Object.keys(templatedAuth.qs);
 			}
 
 			if (requestOptions.headers!.accept === undefined) {
@@ -1104,6 +1138,7 @@ export class HttpRequestV2 implements INodeType {
 					// throw error;
 					throw new NodeApiError(this.getNode(), response as JsonObject, { itemIndex });
 				} else {
+					removeRequestOptions(response.reason);
 					removeCircularRefs(response.reason as JsonObject);
 					// Return the actual reason as error
 					returnItems.push({

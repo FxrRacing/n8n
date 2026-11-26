@@ -3,12 +3,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { Config, Env } from '../decorators';
+import { positiveIntSchema } from '../schemas';
 
 @Config
 export class DataTableConfig {
-	/** Maximum total size in bytes allowed for data tables. Default: 50 MiB. */
+	/** Maximum total size in bytes allowed for data tables. Default: 200 MiB. */
 	@Env('N8N_DATA_TABLES_MAX_SIZE_BYTES')
-	maxSize: number = 50 * 1024 * 1024;
+	maxSize: number = 200 * 1024 * 1024;
 
 	/**
 	 * Size in bytes at which to warn that a data table is nearing capacity.
@@ -32,7 +33,7 @@ export class DataTableConfig {
 	uploadMaxFileSize?: number;
 
 	/** Interval in milliseconds between cleanup runs for orphaned upload files. Default: 1 minute. */
-	@Env('N8N_DATA_TABLES_CLEANUP_INTERVAL_MS')
+	@Env('N8N_DATA_TABLES_CLEANUP_INTERVAL_MS', positiveIntSchema)
 	cleanupIntervalMs: number = 1 * Time.minutes.toMilliseconds;
 
 	/**

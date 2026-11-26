@@ -2,6 +2,8 @@ import type { BrowserConnection } from '../connection';
 import type {
 	CallToolResult,
 	ConnectionState,
+	HtmlProbeNode,
+	HtmlProbeResult,
 	PageInfo,
 	ToolContext,
 	ToolDefinition,
@@ -17,7 +19,7 @@ export function textOf(result: CallToolResult): string {
 /** Extract structuredContent from a result, throwing if it isn't present. */
 export function structuredOf(result: CallToolResult): Record<string, unknown> {
 	if (!result.structuredContent) throw new Error('Expected structuredContent');
-	return result.structuredContent as Record<string, unknown>;
+	return result.structuredContent;
 }
 
 /** Find a tool by name from an array, throwing if not found. */
@@ -30,6 +32,14 @@ export function findTool(tools: ToolDefinition[], name: string): ToolDefinition 
 
 /** Default ToolContext for tests. */
 export const TOOL_CONTEXT: ToolContext = { dir: '/test' };
+
+/** An HTML probe result, as `probePageHtml` would return for one document. */
+export function htmlProbe(html: string, children: HtmlProbeNode[] = []): HtmlProbeResult {
+	return {
+		ok: true,
+		root: { kind: 'document', html, url: 'http://test.com', children, errors: [] },
+	};
+}
 
 /** Create a mock PlaywrightAdapter with all methods stubbed. */
 export function createMockAdapter() {
@@ -97,9 +107,6 @@ export function createMockAdapter() {
 		wait: vi.fn().mockResolvedValue(100),
 
 		// State
-		getCookies: vi.fn().mockResolvedValue([]),
-		setCookies: vi.fn().mockResolvedValue(undefined),
-		clearCookies: vi.fn().mockResolvedValue(undefined),
 		getStorage: vi.fn().mockResolvedValue({}),
 		setStorage: vi.fn().mockResolvedValue(undefined),
 		clearStorage: vi.fn().mockResolvedValue(undefined),
@@ -129,7 +136,7 @@ export function createMockConnection(adapter?: MockAdapter) {
 	]);
 
 	const state: ConnectionState = {
-		adapter: mockAdapter as unknown as ConnectionState['adapter'],
+		adapter: mockAdapter,
 		pages,
 		activePageId: 'page1',
 	};
@@ -141,6 +148,8 @@ export function createMockConnection(adapter?: MockAdapter) {
 			pages: [{ id: 'page1', title: 'Test Page', url: 'http://test.com' }],
 		}),
 		disconnect: vi.fn().mockResolvedValue(undefined),
+		beginToolCall: vi.fn(),
+		explainFailure: vi.fn((error: unknown) => error),
 		isConnected: true,
 	} as unknown as BrowserConnection;
 

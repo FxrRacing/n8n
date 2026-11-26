@@ -16,11 +16,13 @@ import type {
 	WorkflowExpression,
 } from 'n8n-workflow';
 import {
-	ApplicationError,
 	createRunExecutionData,
 	ManualExecutionCancelledError,
 	NodeConnectionTypes,
+	NodeOperationError,
+	CONSOLE_OUTPUT_REDACTED_MESSAGE,
 } from 'n8n-workflow';
+import { UnexpectedError } from '@n8n/errors';
 import { mock } from 'vitest-mock-extended';
 
 import { describeCommonTests } from './shared-tests';
@@ -117,6 +119,27 @@ describe('SupplyDataContext', () => {
 			expect(supplyDataContext.getInputData(inputIndex, connectionType)).toEqual(expectedData);
 		});
 
+		it('should read input data from a map without a prototype', () => {
+			const inputDataWithoutPrototype = { ...inputData };
+			Object.setPrototypeOf(inputDataWithoutPrototype, null);
+			const context = new SupplyDataContext(
+				workflow,
+				node,
+				additionalData,
+				mode,
+				runExecutionData,
+				runIndex,
+				connectionInputData,
+				inputDataWithoutPrototype,
+				connectionType,
+				executeData,
+				[closeFn],
+				abortSignal,
+			);
+
+			expect(context.getInputData(inputIndex, connectionType)).toEqual(inputData.main[inputIndex]);
+		});
+
 		it('should return an empty array if the input name does not exist', () => {
 			const connectionType = 'nonExistent';
 			expect(
@@ -128,7 +151,7 @@ describe('SupplyDataContext', () => {
 			const inputIndex = 2;
 
 			expect(() => supplyDataContext.getInputData(inputIndex, connectionType)).toThrow(
-				ApplicationError,
+				UnexpectedError,
 			);
 		});
 
@@ -136,7 +159,7 @@ describe('SupplyDataContext', () => {
 			inputData.main[inputIndex] = null;
 
 			expect(() => supplyDataContext.getInputData(inputIndex, connectionType)).toThrow(
-				ApplicationError,
+				UnexpectedError,
 			);
 		});
 	});
@@ -264,7 +287,101 @@ describe('SupplyDataContext', () => {
 		});
 	});
 
+	describe('production stdout gating', () => {
+		let logSpy: ReturnType<typeof vi.spyOn>;
+
+		const runDataWith = (production: boolean, manual: boolean) =>
+			({
+				executionData: {
+					runtimeData: { redaction: { version: 2, production, manual } },
+				},
+			}) as unknown as IRunExecutionData;
+
+		beforeEach(() => {
+			process.env.CODE_ENABLE_STDOUT = 'true';
+			logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		});
+
+		afterEach(() => {
+			delete process.env.CODE_ENABLE_STDOUT;
+			logSpy.mockRestore();
+		});
+
+		it('replaces production console output with the marker when the production channel redacts', () => {
+			const context = new SupplyDataContext(
+				workflow,
+				node,
+				additionalData,
+				'trigger',
+				runDataWith(true, false),
+				runIndex,
+				connectionInputData,
+				inputData,
+				connectionType,
+				executeData,
+				[closeFn],
+				abortSignal,
+			);
+
+			context.logNodeOutput('secret-payload');
+
+			expect(logSpy).toHaveBeenCalledWith(
+				expect.stringContaining('[Workflow'),
+				CONSOLE_OUTPUT_REDACTED_MESSAGE,
+			);
+			expect(logSpy).not.toHaveBeenCalledWith(expect.anything(), 'secret-payload');
+		});
+
+		it('passes production console output through unchanged when no channel redacts', () => {
+			const context = new SupplyDataContext(
+				workflow,
+				node,
+				additionalData,
+				'trigger',
+				runDataWith(false, false),
+				runIndex,
+				connectionInputData,
+				inputData,
+				connectionType,
+				executeData,
+				[closeFn],
+				abortSignal,
+			);
+
+			context.logNodeOutput('hello');
+
+			expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[Workflow'), 'hello');
+		});
+	});
+
 	describe('addExecutionDataFunctions', () => {
+		it('should record input in a run-data map without a prototype', async () => {
+			const runData: IRunData = {};
+			Object.setPrototypeOf(runData, null);
+			const testRunExecutionData = createRunExecutionData({ resultData: { runData } });
+			const testAdditionalData = { ...additionalData, hooks: undefined };
+			const context = new SupplyDataContext(
+				workflow,
+				node,
+				testAdditionalData,
+				mode,
+				testRunExecutionData,
+				runIndex,
+				connectionInputData,
+				inputData,
+				connectionType,
+				executeData,
+				[closeFn],
+				abortSignal,
+			);
+			const data = [[{ json: { test: 'data' } }]];
+			const inputType = NodeConnectionTypes.AiTool;
+
+			await context.addExecutionDataFunctions('input', data, inputType, node.name, 0);
+
+			expect(runData[node.name][0].data).toEqual({ [inputType]: data });
+		});
+
 		it('should preserve canceled status when execution is aborted and output has error', async () => {
 			const errorData = new ManualExecutionCancelledError('Execution was aborted');
 			const abortedSignal = mock<AbortSignal>({ aborted: true });
@@ -623,6 +740,188 @@ describe('SupplyDataContext', () => {
 			expect(taskData.hints).toHaveLength(1);
 			expect(taskData.hints![0].message).toContain('null or undefined');
 			expect(taskData.hints![0].location).toBe('outputPane');
+		});
+	});
+
+	// Sub-node executions can run during a trigger's webhook phase (e.g. MCP Trigger tool
+	// calls), where no engine loop stamps the per-node credential flags — the context must
+	// stamp them itself so the persisted execution still gets redacted.
+	describe('dynamic credential flag stamping', () => {
+		const buildStampingContext = () => {
+			const testAdditionalData = mock<IWorkflowExecuteAdditionalData>({
+				credentialsHelper,
+				hooks: { runHook: vi.fn().mockResolvedValue(undefined) },
+				currentNodeExecutionIndex: 0,
+				webhookWaitingBaseUrl: 'http://localhost:5678/webhook-waiting',
+				formWaitingBaseUrl: 'http://localhost:5678/form-waiting',
+			});
+			testAdditionalData.currentNodeUsedDynamicCredentials = false;
+			testAdditionalData.currentNodeAttemptedDynamicCredentials = false;
+			testAdditionalData.dynamicCredentialsResolvedUserId = undefined;
+			testAdditionalData.currentNodeUsedCredentialIds = undefined;
+
+			const testRunExecutionData = createRunExecutionData({
+				resultData: {
+					runData: {
+						[node.name]: [
+							{
+								startTime: Date.now(),
+								executionTime: 0,
+								executionIndex: 0,
+								executionStatus: 'running' as const,
+								source: [],
+							},
+						],
+					},
+				},
+				executionData: {
+					metadata: {},
+					contextData: {},
+					nodeExecutionStack: [],
+					waitingExecution: {},
+					waitingExecutionSource: {},
+					runtimeData: { version: 1, establishedAt: 0, source: 'trigger' },
+				},
+			});
+
+			const testContext = new SupplyDataContext(
+				workflow,
+				node,
+				testAdditionalData,
+				mode,
+				testRunExecutionData,
+				runIndex,
+				connectionInputData,
+				inputData,
+				NodeConnectionTypes.AiTool,
+				executeData,
+				[closeFn],
+				abortSignal,
+			);
+
+			return { testAdditionalData, testRunExecutionData, testContext };
+		};
+
+		it('stamps the flags and resolved user onto the output task data', async () => {
+			const { testAdditionalData, testRunExecutionData, testContext } = buildStampingContext();
+			testAdditionalData.currentNodeUsedDynamicCredentials = true;
+			testAdditionalData.currentNodeAttemptedDynamicCredentials = true;
+			testAdditionalData.dynamicCredentialsResolvedUserId = 'resolved-user';
+
+			await testContext.addExecutionDataFunctions(
+				'output',
+				[[{ json: { result: 'success' } }]],
+				NodeConnectionTypes.AiTool,
+				node.name,
+				0,
+			);
+
+			const taskData = testRunExecutionData.resultData.runData[node.name][0];
+			expect(taskData.usedDynamicCredentials).toBe(true);
+			expect(taskData.attemptedDynamicCredentials).toBe(true);
+			expect(testRunExecutionData.executionData?.runtimeData?.executedByUserId).toBe(
+				'resolved-user',
+			);
+		});
+
+		it('stamps the attempted flag on an error output', async () => {
+			const { testAdditionalData, testRunExecutionData, testContext } = buildStampingContext();
+			testAdditionalData.currentNodeAttemptedDynamicCredentials = true;
+
+			await testContext.addExecutionDataFunctions(
+				'output',
+				new NodeOperationError(node, 'tool failed'),
+				NodeConnectionTypes.AiTool,
+				node.name,
+				0,
+			);
+
+			const taskData = testRunExecutionData.resultData.runData[node.name][0];
+			expect(taskData.executionStatus).toBe('error');
+			expect(taskData.attemptedDynamicCredentials).toBe(true);
+			expect(taskData.usedDynamicCredentials).toBeUndefined();
+			expect(testRunExecutionData.executionData?.runtimeData?.executedByUserId).toBeUndefined();
+		});
+
+		it('stamps nothing when no credential was attempted', async () => {
+			const { testRunExecutionData, testContext } = buildStampingContext();
+
+			await testContext.addExecutionDataFunctions(
+				'output',
+				[[{ json: { result: 'success' } }]],
+				NodeConnectionTypes.AiTool,
+				node.name,
+				0,
+			);
+
+			const taskData = testRunExecutionData.resultData.runData[node.name][0];
+			expect(taskData.usedDynamicCredentials).toBeUndefined();
+			expect(taskData.attemptedDynamicCredentials).toBeUndefined();
+			expect(testRunExecutionData.executionData?.runtimeData?.executedByUserId).toBeUndefined();
+		});
+
+		// The flags are execution-shared and only reset per top-level engine node, so a
+		// sibling sub-node's earlier resolution must not be attributed to this run's task.
+		it('does not stamp flags that were already set before this run started', async () => {
+			const { testAdditionalData, testRunExecutionData, testContext } = buildStampingContext();
+			testAdditionalData.currentNodeUsedDynamicCredentials = true;
+			testAdditionalData.currentNodeAttemptedDynamicCredentials = true;
+			testAdditionalData.dynamicCredentialsResolvedUserId = 'sibling-user';
+
+			const { index } = testContext.addInputData(NodeConnectionTypes.AiTool, [
+				[{ json: { query: 'test' } }],
+			]);
+			await testContext.addExecutionDataFunctions(
+				'output',
+				[[{ json: { result: 'success' } }]],
+				NodeConnectionTypes.AiTool,
+				node.name,
+				index,
+			);
+
+			const taskData = testRunExecutionData.resultData.runData[node.name][index];
+			expect(taskData.usedDynamicCredentials).toBeUndefined();
+			expect(taskData.attemptedDynamicCredentials).toBeUndefined();
+			expect(testRunExecutionData.executionData?.runtimeData?.executedByUserId).toBeUndefined();
+		});
+
+		it('stamps the credential ids a sub-workflow reported during this run', async () => {
+			const { testAdditionalData, testRunExecutionData, testContext } = buildStampingContext();
+			testAdditionalData.currentNodeUsedCredentialIds = ['sibling-cred'];
+
+			const { index } = testContext.addInputData(NodeConnectionTypes.AiTool, [
+				[{ json: { query: 'test' } }],
+			]);
+			testAdditionalData.currentNodeUsedCredentialIds = ['sibling-cred', 'child-cred'];
+			await testContext.addExecutionDataFunctions(
+				'output',
+				[[{ json: { result: 'success' } }]],
+				NodeConnectionTypes.AiTool,
+				node.name,
+				index,
+			);
+
+			const taskData = testRunExecutionData.resultData.runData[node.name][index];
+			expect(taskData.usedCredentialIds).toEqual(['child-cred']);
+		});
+
+		it('does not stamp credential ids that were already reported before this run started', async () => {
+			const { testAdditionalData, testRunExecutionData, testContext } = buildStampingContext();
+			testAdditionalData.currentNodeUsedCredentialIds = ['sibling-cred'];
+
+			const { index } = testContext.addInputData(NodeConnectionTypes.AiTool, [
+				[{ json: { query: 'test' } }],
+			]);
+			await testContext.addExecutionDataFunctions(
+				'output',
+				[[{ json: { result: 'success' } }]],
+				NodeConnectionTypes.AiTool,
+				node.name,
+				index,
+			);
+
+			const taskData = testRunExecutionData.resultData.runData[node.name][index];
+			expect(taskData.usedCredentialIds).toBeUndefined();
 		});
 	});
 

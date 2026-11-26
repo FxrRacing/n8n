@@ -6,9 +6,10 @@ import {
 	createCanvasProvide,
 } from '@/features/workflows/canvas/__tests__/utils';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
+import { useTypeAvailabilityPoliciesStore } from '@n8n/frontend-module-type-availability-policies';
 import { createTestingPinia } from '@pinia/testing';
 import { fireEvent } from '@testing-library/vue';
-import { NodeConnectionTypes } from 'n8n-workflow';
+import { NodeConnectionTypes, type IPinData } from 'n8n-workflow';
 import { computed, type ComputedRef } from 'vue';
 import { setActivePinia } from 'pinia';
 import type * as actualVueRouter from 'vue-router';
@@ -30,23 +31,35 @@ vi.mock('vue-router', async (importOriginal) => {
 
 const renderNodeInputsMap = new Map<string, ComputedRef<CanvasConnectionPort[]>>();
 const renderNodeOutputsMap = new Map<string, ComputedRef<CanvasConnectionPort[]>>();
+const pinnedDataByNodeName: IPinData = {};
+const executionPinDataByNodeId = new Map<string, ComputedRef<IPinData[string] | undefined>>();
 
-vi.mock('@/features/workflows/canvas/canvas.utils', async (importOriginal) => ({
-	...(await importOriginal<typeof import('@/features/workflows/canvas/canvas.utils')>()),
-	injectCanvasRenderData: vi.fn(() => ({
-		value: {
-			nodeInputsByNodeId: renderNodeInputsMap,
-			nodeOutputsByNodeId: renderNodeOutputsMap,
-			pinnedDataByNodeName: {},
-			executionIssuesByNodeName: new Map(),
-		},
-	})),
+vi.mock('@/features/workflows/canvas/canvas.utils', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('@/features/workflows/canvas/canvas.utils')>();
+	return {
+		...actual,
+		injectCanvasRenderData: vi.fn(() => ({
+			value: actual.createEmptyCanvasRenderData({
+				nodeInputsByNodeId: renderNodeInputsMap,
+				nodeOutputsByNodeId: renderNodeOutputsMap,
+				pinnedDataByNodeName,
+				getDisplayedExecutionPinData: (nodeId: string) =>
+					executionPinDataByNodeId.get(nodeId)?.value,
+			}),
+		})),
+	};
+});
+
+vi.mock('@/features/resolvers/composables/useNodePrivateCredential', () => ({
+	useNodePrivateCredential: vi.fn(),
 }));
+
+import { useNodePrivateCredential } from '@/features/resolvers/composables/useNodePrivateCredential';
 
 const stubs = {
 	NodeIcon: {
 		template:
-			'<node-icon-stub :icon-source="iconSource" :size="size" :shrink="shrink" :disabled="disabled"></node-icon-stub>',
+			'<node-icon-stub :data-badge-name="iconSource?.badge?.name" :data-badge-tooltip="iconSource?.badge?.tooltip" :icon-source="iconSource" :size="size" :shrink="shrink" :disabled="disabled"></node-icon-stub>',
 		props: ['icon-source', 'size', 'shrink', 'disabled'],
 	},
 };
@@ -61,16 +74,26 @@ const renderComponent = createComponentRenderer(CanvasNodeDefault, {
 });
 
 let nodeTypesStore: MockedStore<typeof useNodeTypesStore>;
+let typeAvailabilityPoliciesStore: MockedStore<typeof useTypeAvailabilityPoliciesStore>;
 const mockedUseRoute = vi.mocked(useRoute);
 
 beforeEach(() => {
 	vi.clearAllMocks();
 	renderNodeInputsMap.clear();
 	renderNodeOutputsMap.clear();
+	for (const key of Object.keys(pinnedDataByNodeName)) {
+		delete pinnedDataByNodeName[key];
+	}
+	executionPinDataByNodeId.clear();
 	const pinia = createTestingPinia();
 	setActivePinia(pinia);
 	nodeTypesStore = mockedStore(useNodeTypesStore);
+	typeAvailabilityPoliciesStore = mockedStore(useTypeAvailabilityPoliciesStore);
 	mockedUseRoute.mockReturnValue({} as RouteLocationNormalizedLoadedGeneric);
+	vi.mocked(useNodePrivateCredential).mockReturnValue({
+		hasPrivateCredential: computed(() => false),
+		tooltipText: computed(() => ''),
+	});
 });
 
 describe('CanvasNodeDefault', () => {
@@ -85,6 +108,85 @@ describe('CanvasNodeDefault', () => {
 		});
 
 		expect(getByTestId('canvas-default-node')).toMatchSnapshot();
+	});
+
+	describe('private credential', () => {
+		it('shows the private-credential icon (with tooltip) as the node badge, replacing the node badge', () => {
+			vi.mocked(useNodePrivateCredential).mockReturnValue({
+				hasPrivateCredential: computed(() => true),
+				tooltipText: computed(
+					() => 'This node uses private credentials that are resolved at runtime.',
+				),
+			});
+
+			const { getByTestId } = renderComponent({
+				global: {
+					stubs,
+					provide: {
+						...createCanvasNodeProvide({
+							data: {
+								render: {
+									type: CanvasNodeRenderType.Default,
+									options: { icon: { type: 'file', src: 'https://example.com/icon.png' } },
+								},
+							},
+						}),
+					},
+				},
+			});
+
+			const nodeIcon = getByTestId('canvas-default-node').querySelector('node-icon-stub');
+			expect(nodeIcon).toHaveAttribute('data-badge-name', 'user-round-key');
+			expect(nodeIcon).toHaveAttribute(
+				'data-badge-tooltip',
+				'This node uses private credentials that are resolved at runtime.',
+			);
+		});
+	});
+
+	describe('restricted node type', () => {
+		beforeEach(() => {
+			typeAvailabilityPoliciesStore.getNodeTypeAvailability.mockReturnValue({
+				name: 'n8n-nodes-base.slack',
+				available: false,
+				scope: 'instance',
+			});
+		});
+
+		it('renders the restricted treatment: deactivated look, greyed icon, lock and label', () => {
+			const { getByTestId } = renderComponent({
+				global: {
+					stubs,
+					provide: {
+						...createCanvasNodeProvide({
+							data: { type: 'n8n-nodes-base.slack', subtitle: 'send: message' },
+						}),
+					},
+				},
+			});
+
+			const node = getByTestId('canvas-default-node');
+			expect(node).toHaveClass('disabled');
+			expect(node.querySelector('node-icon-stub')).toHaveAttribute('disabled', 'true');
+			expect(getByTestId('canvas-node-restricted')).toHaveTextContent('Restricted');
+			expect(getByTestId('node-restricted')).toBeInTheDocument();
+			expect(node).not.toHaveTextContent('send: message');
+		});
+
+		it('keeps the lock visible on a deactivated restricted node', () => {
+			const { getByTestId } = renderComponent({
+				global: {
+					stubs,
+					provide: {
+						...createCanvasNodeProvide({
+							data: { type: 'n8n-nodes-base.slack', disabled: true },
+						}),
+					},
+				},
+			});
+
+			expect(getByTestId('node-restricted')).toBeInTheDocument();
+		});
 	});
 
 	describe('inputs and outputs', () => {
@@ -265,7 +367,9 @@ describe('CanvasNodeDefault', () => {
 					},
 				},
 			});
-			expect(getByText('Test Node').closest('.node')).toHaveClass('waiting');
+			const node = getByText('Test Node').closest('.node');
+			expect(node).toHaveClass('waiting');
+			expect(node?.querySelector('.statusRing')).not.toBeNull();
 		});
 	});
 
@@ -279,7 +383,63 @@ describe('CanvasNodeDefault', () => {
 					},
 				},
 			});
-			expect(getByText('Test Node').closest('.node')).toHaveClass('running');
+			const node = getByText('Test Node').closest('.node');
+			expect(node).toHaveClass('running');
+			expect(node?.querySelector('.statusRing')).not.toBeNull();
+		});
+
+		it('should not render the status ring when node is idle', () => {
+			const { getByText } = renderComponent({
+				global: { stubs, provide: { ...createCanvasNodeProvide() } },
+			});
+			expect(getByText('Test Node').closest('.node')?.querySelector('.statusRing')).toBeNull();
+		});
+	});
+
+	describe('execution pin data', () => {
+		it('should apply pinned styling instead of success styling when node output used execution pin data', () => {
+			executionPinDataByNodeId.set(
+				'node',
+				computed(() => [{ json: { ok: true } }]),
+			);
+
+			const { getByText } = renderComponent({
+				global: {
+					stubs,
+					provide: {
+						...createCanvasNodeProvide({
+							data: {
+								execution: { status: 'success', running: false },
+								runData: { outputMap: {}, iterations: 1, visible: true },
+							},
+						}),
+					},
+				},
+			});
+
+			const nodeElement = getByText('Test Node').closest('.node');
+			expect(nodeElement).toHaveClass('pinned');
+			expect(nodeElement).not.toHaveClass('success');
+		});
+
+		it('should apply pinned styling for workflow pin data without execution pin data', () => {
+			pinnedDataByNodeName['Test Node'] = [{ json: { ok: true } }];
+
+			const { getByText } = renderComponent({
+				global: {
+					stubs,
+					provide: {
+						...createCanvasNodeProvide({
+							data: {
+								execution: { status: 'success', running: false },
+								runData: { outputMap: {}, iterations: 1, visible: true },
+							},
+						}),
+					},
+				},
+			});
+
+			expect(getByText('Test Node').closest('.node')).toHaveClass('pinned');
 		});
 	});
 
@@ -417,6 +577,53 @@ describe('CanvasNodeDefault', () => {
 
 			expect(getByTestId('canvas-configurable-node')).toMatchSnapshot();
 		});
+
+		it.each([
+			[1, '240px'],
+			[4, '240px'],
+			[6, '336px'],
+		])(
+			'should give a node with %s non-main outputs at the top a width of %s',
+			(outputCount, expectedWidth) => {
+				renderNodeInputsMap.set(
+					'node',
+					computed(() => [
+						{ type: NodeConnectionTypes.Main, index: 0 },
+						{ type: NodeConnectionTypes.AiLanguageModel, index: 0 },
+					]),
+				);
+				renderNodeOutputsMap.set(
+					'node',
+					computed(() =>
+						Array.from({ length: outputCount }, (_, index) => ({
+							type: NodeConnectionTypes.AiTool,
+							index,
+						})),
+					),
+				);
+
+				const { getByText } = renderComponent({
+					global: {
+						stubs,
+						provide: {
+							...createCanvasNodeProvide({
+								data: {
+									render: {
+										type: CanvasNodeRenderType.Default,
+										options: { configurable: true, configuration: true },
+									},
+								},
+							}),
+						},
+					},
+				});
+
+				expect(getByText('Test Node').closest('.node')).toHaveStyle({
+					'--canvas-node--width': expectedWidth,
+					'--canvas-node--height': '80px',
+				});
+			},
+		);
 	});
 
 	describe('trigger', () => {

@@ -2,7 +2,7 @@ import { FxrSsoConfigDto } from '@n8n/api-types';
 import type { AuthenticatedRequest } from '@n8n/db';
 import { Body, Get, GlobalScope, Post, Put, RestController } from '@n8n/decorators';
 
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
+import { BadRequestError } from '@n8n/errors';
 
 import { FxrSsoSettingsService } from './fxr-sso-settings.service';
 import { FxrSsoService } from './fxr-sso.service';

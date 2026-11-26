@@ -1,9 +1,12 @@
-import type { JSONSchema7 } from 'json-schema';
+import { zodSchemaToJsonSchema } from '@n8n/ai-utilities/json-schema';
+import {
+	AgentJsonConfigBaseSchema,
+	AgentModelSchema,
+	EPISODIC_MEMORY_GUIDANCE_MAX_TOPICS,
+	EPISODIC_MEMORY_GUIDANCE_TOPIC_MAX_LENGTH,
+} from '@n8n/api-types';
 import type { ZodObject, ZodRawShape } from 'zod';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
-
-import { AgentModelSchema, RunnableAgentJsonConfigSchema } from '@n8n/api-types';
 
 import { jsonSchemaToCompactText } from '../../json-config/schema-text-serializer';
 
@@ -11,6 +14,10 @@ const BuilderPromptMemoryWorkerModelSchema = z.object({
 	model: AgentModelSchema,
 	credential: z.string().trim().min(1),
 });
+
+const BuilderPromptGuidanceTopicsSchema = z
+	.array(z.string().trim().min(1).max(EPISODIC_MEMORY_GUIDANCE_TOPIC_MAX_LENGTH))
+	.max(EPISODIC_MEMORY_GUIDANCE_MAX_TOPICS);
 
 const BuilderPromptMemoryConfigSchema = z.object({
 	enabled: z.boolean(),
@@ -33,16 +40,21 @@ const BuilderPromptMemoryConfigSchema = z.object({
 			z.object({
 				enabled: z.literal(true),
 				credential: z.string().min(1),
-				extractorModel: BuilderPromptMemoryWorkerModelSchema.optional(),
 				reflectorModel: BuilderPromptMemoryWorkerModelSchema.optional(),
 				topK: z.number().int().min(1).max(100).optional(),
 				maxEntriesPerRun: z.number().int().min(1).max(50).optional(),
+				guidance: z
+					.object({
+						include: BuilderPromptGuidanceTopicsSchema.optional(),
+						exclude: BuilderPromptGuidanceTopicsSchema.optional(),
+					})
+					.optional(),
 			}),
 		])
 		.optional(),
 });
 
-const BuilderPromptAgentJsonConfigSchema = RunnableAgentJsonConfigSchema.extend({
+const BuilderPromptAgentJsonConfigSchema = AgentJsonConfigBaseSchema.extend({
 	memory: BuilderPromptMemoryConfigSchema.optional(),
 });
 
@@ -50,42 +62,29 @@ export function getConfigRulesSection(): string {
 	return `\
 #### Agent Config Rules
 
-- \`model\` must be "provider/model-name".
-- \`credential\` must be the id returned by \`resolve_llm\` or \`ask_llm\`.
-- Fresh agents must include a brief \`description\` explaining what the agent
-  does. Keep it specific and user-facing; never write placeholder copy.
-- Fresh agents must include
-  \`memory: { "enabled": true, "storage": "n8n" }\`
-  unless the user explicitly asks to disable memory.
-- \`memory.storage\` must be "n8n".
-- \`memory.episodicMemory\` requires \`ask_credential\` with
-  \`credentialType: "openAiApi"\`.
-- Memory worker model fields use \`{ "model": "provider/model-name", "credential": "<credentialId>" }\`;
-  use only credential IDs returned by \`resolve_llm\`, \`ask_llm\`, or \`ask_credential\`.
-- Subagent delegation lives at top level under \`subAgents\`.
-  Delegation is always available; do not write an enabled/disabled flag.
-  \`subAgents.agents\` is only for optional saved/published n8n Agent specialists;
-  inline delegation uses \`subAgentId: "inline"\` at tool-call time and does not
-  require saved-agent refs. The runtime also exposes \`write_todos\` for planning
-  complex multi-step work before separate \`delegate_subagent\` calls. Only use
-  \`agentId\` values returned by \`list_sub_agents\`.
-- Web search lives under \`config.webSearch\`. Only OpenAI and Anthropic models
-  support native web search; for those providers, use
-  \`{ "enabled": true, "provider": "native" }\` or omit \`provider\`. Every
-  other provider requires fallback search with \`provider: "brave"\` or
-  \`provider: "searxng"\` and a credential. Never write \`{ "enabled": true }\`
-  alone for fallback search. Use exact \`ask_credential\` types:
-  \`braveSearchApi\` for Brave and \`searXngApi\` for SearXNG.
-- Preserve existing Brave/SearXNG \`config.webSearch\` on model switches unless
-  the user explicitly asks to change web-search method.
+- \`model\` must be "provider/model-name", or \`""\` while LLM setup is pending.
+- A non-empty \`credential\` must be the id returned by \`agent_builder_resolve_llm\`.
+- Sub-agent configuration lives at top level under \`subAgents\`. Load
+  \`agent-builder-sub-agents\` before adding refs or changing
+  \`subAgents.maxChildren\`.
+- The server turns on \`config.promptCaching\` for every model that supports
+  it. Do not write it unless the user asks. A user can turn it off, for example
+  when a custom endpoint rejects the prompt cache fields. Then write
+  \`config.promptCaching: { "enabled": false }\`. The server keeps the stored
+  setting when a write omits it. Never turn it back on unless the user asks. To tune the cache duration for Anthropic models and routed
+  Claude models (OpenRouter, Google Vertex, Microsoft Foundry), write the full
+  object, for example
+  \`config.promptCaching: { "enabled": true, "anthropic": { "ttl": "5m" } }\`
+  (\`"5m"\` or \`"1h"\`, default \`"1h"\`).
 - \`config.maxIterations\` caps the number of agent loop iterations per run. Do not set or change this unless the user explicitly asks.
-- Fresh agents need a real model, credential, description, and instructions
-  before config is written.`;
+- Fresh agents need real \`instructions\` before config is written. \`model\`
+  may be \`""\` and \`credential\` omitted in a draft while LLM setup is
+  pending; fill both from a \`agent_builder_resolve_llm\` result before publishing.`;
 }
 
 export function getSchemaReferenceSection(): string {
 	const zodSchema: ZodObject<ZodRawShape> = BuilderPromptAgentJsonConfigSchema;
-	const jsonSchemaText = jsonSchemaToCompactText(zodToJsonSchema(zodSchema) as JSONSchema7);
+	const jsonSchemaText = jsonSchemaToCompactText(zodSchemaToJsonSchema(zodSchema));
 	return `\
 #### Config Schema Reference
 

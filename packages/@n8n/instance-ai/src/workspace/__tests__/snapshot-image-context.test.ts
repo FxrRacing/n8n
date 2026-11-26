@@ -1,11 +1,8 @@
-import { access, readFile, rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-	disposeSnapshotImageContext,
-	stageWorkspaceFilesForImage,
-} from '../snapshot-image-context';
+import { stageWorkspaceFilesForImage } from '../snapshot-image-context';
 
 const WORKSPACE_ROOT = '/home/daytona/workspace';
 
@@ -22,9 +19,10 @@ describe('snapshot-image-context', () => {
 	});
 
 	it('writes nested workspace files under the staging directory', async () => {
-		const files = new Map([
+		const files = new Map<string, string | Buffer>([
 			[`${WORKSPACE_ROOT}/skills/demo/SKILL.md`, '# Demo'],
 			[`${WORKSPACE_ROOT}/knowledge-base/best-practices/scheduling.md`, '# Schedule'],
+			[`${WORKSPACE_ROOT}/.n8n-packages/sdk.tgz`, Buffer.from([0, 1, 2, 255])],
 		]);
 
 		const { stagingDir } = await stageWorkspaceFilesForImage(files, WORKSPACE_ROOT);
@@ -36,9 +34,13 @@ describe('snapshot-image-context', () => {
 		await expect(
 			readFile(join(stagingDir, 'knowledge-base/best-practices/scheduling.md'), 'utf-8'),
 		).resolves.toBe('# Schedule');
+		await expect(readFile(join(stagingDir, '.n8n-packages/sdk.tgz'))).resolves.toEqual(
+			Buffer.from([0, 1, 2, 255]),
+		);
 	});
 
-	it('reuses a hash-keyed staging directory for the same cache key', async () => {
+	it('stages once per cache key and reuses the directory read-only', async () => {
+		// Same key ⇒ same content in prod, so the repeat reuses the first staging (filesB ignored).
 		const filesA = new Map([[`${WORKSPACE_ROOT}/package.json`, '{"name":"a"}']]);
 		const filesB = new Map([[`${WORKSPACE_ROOT}/package.json`, '{"name":"b"}']]);
 		const cacheKey = 'aaaaaaaaaaaa-bbbbbbbbbbbb';
@@ -49,16 +51,36 @@ describe('snapshot-image-context', () => {
 
 		expect(second.stagingDir).toBe(first.stagingDir);
 		await expect(readFile(join(first.stagingDir, 'package.json'), 'utf-8')).resolves.toBe(
-			'{"name":"b"}',
+			'{"name":"a"}',
 		);
 	});
 
-	it('disposeSnapshotImageContext removes the staging directory', async () => {
-		const files = new Map([[`${WORKSPACE_ROOT}/build.mjs`, 'export {};']]);
-		const { stagingDir } = await stageWorkspaceFilesForImage(files, WORKSPACE_ROOT);
-		await disposeSnapshotImageContext(stagingDir);
+	it('serves concurrent stagings for the same cache key from a single directory', async () => {
+		const cacheKey = 'cccccccccccc-dddddddddddd';
+		const files = new Map([
+			[`${WORKSPACE_ROOT}/package.json`, '{"name":"concurrent"}'],
+			[`${WORKSPACE_ROOT}/skills/post-build-flow/SKILL.md`, '# Post build'],
+			[`${WORKSPACE_ROOT}/knowledge-base/reference/example.md`, 'export const x = 1;'],
+		]);
 
-		await expect(access(stagingDir)).rejects.toThrow();
+		const results = await Promise.all(
+			Array.from(
+				{ length: 8 },
+				async () => await stageWorkspaceFilesForImage(files, WORKSPACE_ROOT, cacheKey),
+			),
+		);
+		tempDirs.push(results[0].stagingDir);
+
+		// All callers share one directory and every file is intact — no rm clobbered a write.
+		for (const result of results) {
+			expect(result.stagingDir).toBe(results[0].stagingDir);
+		}
+		await expect(
+			readFile(join(results[0].stagingDir, 'skills/post-build-flow/SKILL.md'), 'utf-8'),
+		).resolves.toBe('# Post build');
+		await expect(
+			readFile(join(results[0].stagingDir, 'knowledge-base/reference/example.md'), 'utf-8'),
+		).resolves.toBe('export const x = 1;');
 	});
 
 	it('throws when a file path is outside the workspace root', async () => {

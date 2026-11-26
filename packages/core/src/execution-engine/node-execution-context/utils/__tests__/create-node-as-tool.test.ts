@@ -12,13 +12,21 @@ vi.mock('@langchain/core/tools', () => ({
 			description: string;
 			schema: unknown;
 			func: unknown;
+			metadata: unknown;
 		},
-		config: { name: string; description: string; schema: unknown; func: unknown },
+		config: {
+			name: string;
+			description: string;
+			schema: unknown;
+			func: unknown;
+			metadata: unknown;
+		},
 	) {
 		this.name = config.name;
 		this.description = config.description;
 		this.schema = config.schema;
 		this.func = config.func;
+		this.metadata = config.metadata;
 	}),
 }));
 
@@ -87,6 +95,74 @@ describe('createNodeAsTool', () => {
 			const tool = createNodeAsTool(options).response;
 
 			expect(tool.description).toBe('Another custom tool description');
+		});
+
+		it('should evaluate expressions in toolDescription using the supplied context', () => {
+			node.parameters.descriptionType = 'manual';
+			node.parameters.toolDescription = '={{ $json.sessionId }}{{ $json.user }}';
+			(context.getNodeParameter as Mock).mockImplementation((name: string, _itemIndex: number) => {
+				if (name === 'toolDescription') return '123ABC';
+				return undefined;
+			});
+
+			const tool = createNodeAsTool({ ...options, context, itemIndex: 0 }).response;
+
+			expect(context.getNodeParameter).toHaveBeenCalledWith('toolDescription', 0, '');
+			expect(tool.description).toBe('123ABC');
+		});
+
+		it('should leave the raw expression as-is when no context is provided', () => {
+			node.parameters.descriptionType = 'manual';
+			node.parameters.toolDescription = '={{ $json.sessionId }}';
+
+			const tool = createNodeAsTool(options).response;
+
+			expect(tool.description).toBe('={{ $json.sessionId }}');
+		});
+
+		it('should not call context.getNodeParameter for a static toolDescription', () => {
+			node.parameters.descriptionType = 'manual';
+			node.parameters.toolDescription = 'Plain static description';
+			(context.getNodeParameter as Mock).mockClear();
+
+			const tool = createNodeAsTool({ ...options, context, itemIndex: 0 }).response;
+
+			expect(context.getNodeParameter).not.toHaveBeenCalledWith(
+				'toolDescription',
+				expect.anything(),
+				expect.anything(),
+			);
+			expect(tool.description).toBe('Plain static description');
+		});
+	});
+
+	describe('Tool metadata', () => {
+		it('should set sourceNodeName in metadata', () => {
+			const tool = createNodeAsTool(options).response;
+
+			expect(tool.metadata?.sourceNodeName).toBe('Test_Node');
+		});
+
+		it('should set metadata.attribution from the toolAttribution parameter', () => {
+			node.parameters.toolAttribution = 'Powered by Databricks Genie';
+
+			const tool = createNodeAsTool(options).response;
+
+			expect(tool.metadata?.attribution).toBe('Powered by Databricks Genie');
+		});
+
+		it('should not set metadata.attribution when toolAttribution is absent', () => {
+			const tool = createNodeAsTool(options).response;
+
+			expect(tool.metadata).not.toHaveProperty('attribution');
+		});
+
+		it('should not set metadata.attribution when toolAttribution is empty', () => {
+			node.parameters.toolAttribution = '';
+
+			const tool = createNodeAsTool(options).response;
+
+			expect(tool.metadata).not.toHaveProperty('attribution');
 		});
 	});
 

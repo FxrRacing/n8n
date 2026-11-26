@@ -23,6 +23,7 @@ const canSelectNextItem = computed(
 );
 
 const inputCharWidth = computed(() => itemIndex.value.toString().length);
+const inputWidth = computed(() => `calc(${inputCharWidth.value}ch + var(--spacing--sm))`);
 
 function updateItemIndex(index: number) {
 	ndvStore.value.expressionOutputItemIndex = index;
@@ -52,7 +53,7 @@ function prevItem() {
 				:min="0"
 				:max="max"
 				:model-value="itemIndex"
-				:style="{ '--output-item-select--width': `calc(${inputCharWidth}ch + var(--spacing--sm))` }"
+				:style="{ width: inputWidth, maxWidth: inputWidth, minWidth: inputWidth }"
 				@update:model-value="updateItemIndex"
 			></N8nInputNumber>
 			<N8nIconButton
@@ -61,10 +62,11 @@ function prevItem() {
 				icon="chevron-left"
 				size="xsmall"
 				:disabled="!canSelectPrevItem"
+				:aria-label="i18n.baseText('parameterInput.previousItem')"
 				@click="prevItem"
 			></N8nIconButton>
 
-			<N8nTooltip placement="right" :disabled="hideTableHoverHint">
+			<N8nTooltip as-child placement="right" :disabled="hideTableHoverHint">
 				<template #content>
 					<div>{{ i18n.baseText('parameterInput.hoverTableItemTip') }}</div>
 				</template>
@@ -74,6 +76,8 @@ function prevItem() {
 					icon="chevron-right"
 					size="xsmall"
 					:disabled="!canSelectNextItem"
+					:aria-label="i18n.baseText('parameterInput.nextItem')"
+					:focusable-when-disabled="!hideTableHoverHint"
 					@click="nextItem"
 				></N8nIconButton>
 			</N8nTooltip>
@@ -85,12 +89,14 @@ function prevItem() {
 .item {
 	display: flex;
 	align-items: center;
+	flex-shrink: 0;
 	gap: var(--spacing--4xs);
 }
 
 .controls {
 	display: flex;
 	align-items: center;
+	flex-shrink: 0;
 }
 
 .controls .input {
@@ -99,19 +105,17 @@ function prevItem() {
 	--input--radius--bottom-left: var(--radius);
 	--input-triple--radius--top-right: var(--radius);
 	--input-triple--radius--bottom-right: var(--radius);
+	--input--padding: var(--spacing--4xs);
+	flex: 0 0 auto;
+	box-sizing: border-box;
 	line-height: calc(var(--input--height) - var(--spacing--4xs));
 
 	&.hovering {
 		--input--color--text: var(--color--secondary);
 	}
 
-	:global(.el-input__inner) {
-		height: var(--input--height);
-		min-height: var(--input--height);
-		line-height: var(--input--height);
+	:global(input) {
 		text-align: center;
-		padding: 0 var(--spacing--4xs);
-		max-width: var(--output-item-select--width);
 	}
 }
 </style>

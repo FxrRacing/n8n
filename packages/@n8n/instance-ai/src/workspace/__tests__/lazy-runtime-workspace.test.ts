@@ -1,9 +1,11 @@
 import {
+	CORE_WORKSPACE_TOOL_NAMES,
 	Workspace,
 	type CommandResult,
 	type WorkspaceFilesystem,
 	type WorkspaceSandbox,
 } from '@n8n/agents';
+import { createDeferredPromise } from '@n8n/utils/promise/deferred-promise';
 
 import { createLazyRuntimeWorkspace } from '../lazy-runtime-workspace';
 
@@ -66,7 +68,6 @@ function createMockWorkspace() {
 			await Promise.resolve();
 		}),
 		getInstructions: vi.fn(() => 'Real sandbox instructions.'),
-		getDefaultCommandEnv: vi.fn(() => ({ CUSTOM_ENV: 'enabled' })),
 		executeCommand,
 	};
 
@@ -76,6 +77,10 @@ function createMockWorkspace() {
 		sandbox,
 		executeCommand,
 	};
+}
+
+async function flushMacrotask(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe('createLazyRuntimeWorkspace', () => {
@@ -88,8 +93,9 @@ describe('createLazyRuntimeWorkspace', () => {
 		lazyWorkspace.getInstructions();
 
 		expect(ensureWorkspace).not.toHaveBeenCalled();
-		expect(tools.some((tool) => tool.name === 'workspace_read_file')).toBe(true);
-		expect(tools.some((tool) => tool.name === 'workspace_execute_command')).toBe(true);
+		expect(tools.map((tool) => tool.name).sort()).toEqual([...CORE_WORKSPACE_TOOL_NAMES].sort());
+		expect(tools.some((tool) => tool.name === 'workspace_list_files')).toBe(false);
+		expect(tools.some((tool) => tool.name === 'workspace_append_file')).toBe(false);
 
 		const readFile = tools.find((tool) => tool.name === 'workspace_read_file');
 		await readFile?.handler?.({ path: '/workspace/report.md' }, {});
@@ -97,22 +103,34 @@ describe('createLazyRuntimeWorkspace', () => {
 		expect(ensureWorkspace).toHaveBeenCalledTimes(1);
 	});
 
-	it('merges sandbox default env after the real workspace is created', async () => {
+	it('reports cancellation when an active command returns a transport cancellation', async () => {
 		const { workspace, executeCommand } = createMockWorkspace();
-		const ensureWorkspace = vi.fn(async () => await Promise.resolve(workspace));
-		const lazyWorkspace = createLazyRuntimeWorkspace({ ensureWorkspace });
-		const executeCommandTool = lazyWorkspace
-			.getTools()
-			.find((tool) => tool.name === 'workspace_execute_command');
-
-		const result = await executeCommandTool?.handler?.({ command: 'echo $CUSTOM_ENV' }, {});
-
-		expect(result).toMatchObject({ stdout: 'enabled' });
-		expect(executeCommand.mock.calls[0]?.[0]).toBe('echo $CUSTOM_ENV');
-		expect(executeCommand.mock.calls[0]?.[1]).toEqual([]);
-		expect(executeCommand.mock.calls[0]?.[2]?.env).toMatchObject({
-			CUSTOM_ENV: 'enabled',
+		const started = createDeferredPromise();
+		executeCommand.mockImplementation(
+			async (_command, _args, options) =>
+				await new Promise<CommandResult>((_resolve, reject) => {
+					options?.abortSignal?.addEventListener(
+						'abort',
+						() => {
+							const error = new Error('canceled');
+							error.name = 'CanceledError';
+							reject(error);
+						},
+						{ once: true },
+					);
+					started.resolve();
+				}),
+		);
+		const lazyWorkspace = createLazyRuntimeWorkspace({
+			ensureWorkspace: async () => await Promise.resolve(workspace),
 		});
+		const controller = new AbortController();
+		const operation = lazyWorkspace.sandbox!.executeCommand!('sleep 10', [], {
+			abortSignal: controller.signal,
+		});
+		await started.promise;
+		controller.abort();
+		await expect(operation).rejects.toMatchObject({ name: 'AbortError' });
 	});
 
 	it('retries workspace creation after the first lazy initialization fails', async () => {
@@ -153,6 +171,90 @@ describe('createLazyRuntimeWorkspace', () => {
 		expect(ensureWorkspace).toHaveBeenCalledTimes(2);
 	});
 
+	it('starts workspace creation on prewarm and reuses it for the first tool call', async () => {
+		const { workspace } = createMockWorkspace();
+		const creation = createDeferredPromise<Workspace>();
+		const ensureWorkspace = vi.fn(async () => await creation.promise);
+		const lazyWorkspace = createLazyRuntimeWorkspace({ ensureWorkspace });
+		const readFile = lazyWorkspace.getTools().find((tool) => tool.name === 'workspace_read_file');
+
+		lazyWorkspace.prewarm();
+		expect(ensureWorkspace).toHaveBeenCalledTimes(1);
+
+		const read = readFile?.handler?.({ path: '/workspace/report.md' }, {});
+		creation.resolve(workspace);
+
+		await expect(read).resolves.toEqual({ content: 'hello' });
+		expect(ensureWorkspace).toHaveBeenCalledTimes(1);
+	});
+
+	it('creates the workspace again in the tool call after a failed prewarm', async () => {
+		const { workspace } = createMockWorkspace();
+		const ensureWorkspace = vi
+			.fn()
+			.mockRejectedValueOnce(new Error('setup failed'))
+			.mockResolvedValueOnce(workspace);
+		const lazyWorkspace = createLazyRuntimeWorkspace({ ensureWorkspace });
+		const readFile = lazyWorkspace.getTools().find((tool) => tool.name === 'workspace_read_file');
+
+		lazyWorkspace.prewarm();
+		await vi.waitFor(() => expect(ensureWorkspace).toHaveBeenCalledTimes(1));
+
+		await expect(readFile?.handler?.({ path: '/workspace/report.md' }, {})).resolves.toEqual({
+			content: 'hello',
+		});
+		expect(ensureWorkspace).toHaveBeenCalledTimes(2);
+	});
+
+	it('creates the workspace again when a prewarm the tool call joined fails', async () => {
+		const { workspace } = createMockWorkspace();
+		const prewarmCreation = createDeferredPromise<Workspace>();
+		const ensureWorkspace = vi
+			.fn<() => Promise<Workspace>>()
+			.mockImplementationOnce(async () => await prewarmCreation.promise)
+			.mockResolvedValueOnce(workspace);
+		const lazyWorkspace = createLazyRuntimeWorkspace({ ensureWorkspace });
+		const readFile = lazyWorkspace.getTools().find((tool) => tool.name === 'workspace_read_file');
+
+		lazyWorkspace.prewarm();
+		const read = readFile?.handler?.({ path: '/workspace/report.md' }, {});
+		// Let the tool call reach the shared creation before it fails.
+		await flushMacrotask();
+		prewarmCreation.reject(new Error('setup failed'));
+
+		await expect(read).resolves.toEqual({ content: 'hello' });
+		expect(ensureWorkspace).toHaveBeenCalledTimes(2);
+	});
+
+	it('creates the workspace once for concurrent tool calls that joined a failed prewarm', async () => {
+		const { workspace } = createMockWorkspace();
+		const prewarmCreation = createDeferredPromise<Workspace>();
+		const ensureWorkspace = vi
+			.fn<() => Promise<Workspace>>()
+			.mockImplementationOnce(async () => await prewarmCreation.promise)
+			.mockResolvedValue(workspace);
+		const lazyWorkspace = createLazyRuntimeWorkspace({ ensureWorkspace });
+		const readFile = lazyWorkspace.getTools().find((tool) => tool.name === 'workspace_read_file');
+
+		lazyWorkspace.prewarm();
+		const read = async (path: string) => await readFile?.handler?.({ path }, {});
+		const reads = [read('/workspace/a.md'), read('/workspace/b.md')];
+		await flushMacrotask();
+		prewarmCreation.reject(new Error('setup failed'));
+
+		await expect(Promise.all(reads)).resolves.toEqual([{ content: 'hello' }, { content: 'hello' }]);
+		expect(ensureWorkspace).toHaveBeenCalledTimes(2);
+	});
+
+	it('marks the workspace tools as needing the workspace', () => {
+		const { workspace } = createMockWorkspace();
+		const lazyWorkspace = createLazyRuntimeWorkspace({
+			ensureWorkspace: async () => await Promise.resolve(workspace),
+		});
+
+		expect(lazyWorkspace.getTools().every((tool) => tool.requiresWorkspace)).toBe(true);
+	});
+
 	it('reflects resolved provider statuses and instructions', async () => {
 		const { workspace } = createMockWorkspace();
 		const ensureWorkspace = vi.fn(async () => await Promise.resolve(workspace));
@@ -170,6 +272,32 @@ describe('createLazyRuntimeWorkspace', () => {
 		expect(lazyWorkspace.getInstructions()).toContain('Real filesystem instructions.');
 	});
 
+	it('returns stable sandbox and filesystem instructions regardless of resolution', async () => {
+		const { workspace } = createMockWorkspace();
+		const ensureWorkspace = vi.fn(async () => await Promise.resolve(workspace));
+		const lazyWorkspace = createLazyRuntimeWorkspace({
+			ensureWorkspace,
+			sandboxInstructions: 'Stable sandbox instructions.',
+			filesystemInstructions: 'Stable filesystem instructions.',
+		});
+
+		// Before resolution: the stable text, not the "on first use" fallback.
+		const sandboxBefore = lazyWorkspace.sandbox?.getInstructions?.();
+		const filesystemBefore = lazyWorkspace.filesystem?.getInstructions?.();
+		expect(sandboxBefore).toBe('Stable sandbox instructions.');
+		expect(filesystemBefore).toBe('Stable filesystem instructions.');
+
+		await lazyWorkspace.filesystem?.readFile('/workspace/report.md');
+
+		// After resolution: byte-identical — the live resolved text must not leak
+		// in, since that would shift the agent's cached prompt prefix on resume.
+		expect(lazyWorkspace.sandbox?.status).toBe('running');
+		expect(lazyWorkspace.sandbox?.getInstructions?.()).toBe(sandboxBefore);
+		expect(lazyWorkspace.filesystem?.getInstructions?.()).toBe(filesystemBefore);
+		expect(lazyWorkspace.getInstructions()).not.toContain('Real sandbox instructions.');
+		expect(lazyWorkspace.getInstructions()).not.toContain('Real filesystem instructions.');
+	});
+
 	it('destroys the resolved workspace when the lazy workspace is destroyed', async () => {
 		const { workspace, filesystem, sandbox } = createMockWorkspace();
 		const ensureWorkspace = vi.fn(async () => await Promise.resolve(workspace));
@@ -182,5 +310,26 @@ describe('createLazyRuntimeWorkspace', () => {
 		expect(filesystem.destroy).toHaveBeenCalledTimes(1);
 		expect(lazyWorkspace.filesystem?.status).toBe('destroyed');
 		expect(lazyWorkspace.sandbox?.status).toBe('destroyed');
+	});
+
+	it('aborts writeFile while lazy workspace bring-up is still pending', async () => {
+		const abortController = new AbortController();
+		const ensureWorkspace = vi.fn(
+			async () =>
+				await new Promise<Workspace>(() => {
+					// Never resolves — simulates Daytona create/start hanging.
+				}),
+		);
+		const lazyWorkspace = createLazyRuntimeWorkspace({ ensureWorkspace });
+		const writePromise = lazyWorkspace.filesystem!.writeFile('/workflow.ts', 'export {}', {
+			abortSignal: abortController.signal,
+		});
+
+		abortController.abort('Agent run was aborted');
+
+		await expect(writePromise).rejects.toMatchObject({
+			name: 'AbortError',
+			message: 'Agent run was aborted',
+		});
 	});
 });

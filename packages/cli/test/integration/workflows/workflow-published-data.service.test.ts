@@ -4,7 +4,7 @@ import { Container } from '@n8n/di';
 import type { INode } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 
-import { WorkflowPublishedDataService } from '@/workflows/workflow-published-data.service';
+import { WorkflowPublishedDataService } from '@n8n/backend-services';
 
 import { createOwner } from '../shared/db/users';
 import { createWorkflowHistoryItem } from '../shared/db/workflow-history';
@@ -77,6 +77,31 @@ describe('WorkflowPublishedDataService', () => {
 		expect(result!.publishedVersion.nodes).not.toEqual(
 			expect.arrayContaining([expect.objectContaining({ type: 'n8n-nodes-base.scheduleTrigger' })]),
 		);
+	});
+
+	test('should include node groups in the execution projection', async () => {
+		const owner = await createOwner();
+		const workflow = await createWorkflowWithHistory({}, owner);
+		await setActiveVersion(workflow.id, workflow.versionId);
+
+		const versionId = uuid();
+		const nodes = [makeNode('Grouped Node')];
+		const nodeGroups = [{ id: 'group-1', name: 'Group 1', nodeIds: [nodes[0].id] }];
+		await createWorkflowHistoryItem(workflow.id, {
+			versionId,
+			nodes,
+			connections: {},
+			nodeGroups,
+		});
+
+		await workflowPublishedVersionRepository.setPublishedVersion(workflow.id, versionId);
+
+		const result = await workflowPublishedDataService.getPublishedWorkflowDataForExecution(
+			workflow.id,
+		);
+
+		expect(result).not.toBeNull();
+		expect(result!.nodeGroups).toEqual(nodeGroups);
 	});
 
 	test('should return null when published_version table has no record', async () => {

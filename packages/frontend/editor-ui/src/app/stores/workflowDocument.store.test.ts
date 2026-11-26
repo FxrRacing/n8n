@@ -15,7 +15,12 @@ import {
 	useWorkflowDocumentStore,
 	createWorkflowDocumentId,
 	disposeWorkflowDocumentStore,
+	provideWorkflowDocumentStore,
 } from '@/app/stores/workflowDocument.store';
+import { injectNDVStore, useNDVStore } from '@/features/ndv/shared/ndv.store';
+import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { defineComponent, h } from 'vue';
+import { mount } from '@vue/test-utils';
 import { DEFAULT_SETTINGS } from '@/app/constants/workflows';
 import { useUIStore } from '@/app/stores/ui.store';
 import { createTestNode } from '@/__tests__/mocks';
@@ -23,13 +28,17 @@ import type { INodeUi, IWorkflowDb } from '@/Interface';
 import type { ProjectSharingData } from '@/features/collaboration/projects/projects.types';
 import type { IUsedCredential } from '@/features/credentials/credentials.types';
 
-const { getNodeTypeMock } = vi.hoisted(() => ({
+const { getNodeTypeMock, isTriggerNodeMock } = vi.hoisted(() => ({
 	getNodeTypeMock: vi.fn().mockReturnValue(null),
+	// The publish gate asks which nodes start a run. Anything named like a trigger
+	// counts, which keeps these tests readable without a node-type registry.
+	isTriggerNodeMock: vi.fn((type: string) => type.toLowerCase().includes('trigger')),
 }));
 
 vi.mock('@/app/stores/nodeTypes.store', () => ({
 	useNodeTypesStore: vi.fn(() => ({
 		getNodeType: getNodeTypeMock,
+		isTriggerNode: isTriggerNodeMock,
 		communityNodeType: vi.fn().mockReturnValue(null),
 		getAllNodeTypes: vi.fn().mockReturnValue({
 			nodeTypes: {},
@@ -200,8 +209,8 @@ describe('workflowDocument.store orchestration', () => {
 		});
 	});
 
-	describe('hasNodeValidationIssues', () => {
-		it('should return true when a node has issues and connected', () => {
+	describe('nodeValidationIssues', () => {
+		it('should report a node that has issues and is connected', () => {
 			const workflowDocumentStore = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
 
 			workflowDocumentStore.setNodes([
@@ -213,11 +222,10 @@ describe('workflowDocument.store orchestration', () => {
 				Node1: { main: [[{ node: 'Node2', type: NodeConnectionTypes.Main, index: 0 }]] },
 			});
 
-			const hasIssues = workflowDocumentStore.hasNodeValidationIssues;
-			expect(hasIssues).toBe(true);
+			expect(workflowDocumentStore.nodeValidationIssues.length).toBeGreaterThan(0);
 		});
 
-		it('should return false when node has issues but it is not connected', () => {
+		it('should report nothing when the node with issues is not connected', () => {
 			const workflowDocumentStore = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
 
 			workflowDocumentStore.setNodes([
@@ -225,11 +233,10 @@ describe('workflowDocument.store orchestration', () => {
 				createNode({ name: 'Node2' }),
 			]);
 
-			const hasIssues = workflowDocumentStore.hasNodeValidationIssues;
-			expect(hasIssues).toBe(false);
+			expect(workflowDocumentStore.nodeValidationIssues).toEqual([]);
 		});
 
-		it('should return false when no nodes have issues', () => {
+		it('should report nothing when no nodes have issues', () => {
 			const workflowDocumentStore = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
 
 			workflowDocumentStore.setNodes([
@@ -240,17 +247,50 @@ describe('workflowDocument.store orchestration', () => {
 				Node1: { main: [[{ node: 'Node2', type: NodeConnectionTypes.Main, index: 0 }]] },
 			});
 
-			const hasIssues = workflowDocumentStore.hasNodeValidationIssues;
-			expect(hasIssues).toBe(false);
+			expect(workflowDocumentStore.nodeValidationIssues).toEqual([]);
 		});
 
-		it('should return false when there are no nodes', () => {
+		it('should report nothing when there are no nodes', () => {
 			const workflowDocumentStore = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
 
 			workflowDocumentStore.setNodes([]);
 
-			const hasIssues = workflowDocumentStore.hasNodeValidationIssues;
-			expect(hasIssues).toBe(false);
+			expect(workflowDocumentStore.nodeValidationIssues).toEqual([]);
+		});
+	});
+
+	describe('hasPublishBlockingIssues', () => {
+		it('should block when a trigger reaches the node with issues', () => {
+			const workflowDocumentStore = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
+
+			workflowDocumentStore.setNodes([
+				createNode({ name: 'My trigger', type: 'n8n-nodes-base.scheduleTrigger' }),
+				createNode({ name: 'Node1', issues: { parameters: { field: ['Error message'] } } }),
+			]);
+			workflowDocumentStore.setConnections({
+				'My trigger': { main: [[{ node: 'Node1', type: NodeConnectionTypes.Main, index: 0 }]] },
+			});
+
+			expect(workflowDocumentStore.hasPublishBlockingIssues).toBe(true);
+		});
+
+		it('should not block when the node with issues sits on an island', () => {
+			const workflowDocumentStore = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
+
+			// Node1 and Node2 are wired to each other, so connectedness would call
+			// Node1 live. No trigger reaches them, so no run can involve them.
+			workflowDocumentStore.setNodes([
+				createNode({ name: 'My trigger', type: 'n8n-nodes-base.scheduleTrigger' }),
+				createNode({ name: 'Reached' }),
+				createNode({ name: 'Node1', issues: { parameters: { field: ['Error message'] } } }),
+				createNode({ name: 'Node2' }),
+			]);
+			workflowDocumentStore.setConnections({
+				'My trigger': { main: [[{ node: 'Reached', type: NodeConnectionTypes.Main, index: 0 }]] },
+				Node1: { main: [[{ node: 'Node2', type: NodeConnectionTypes.Main, index: 0 }]] },
+			});
+
+			expect(workflowDocumentStore.hasPublishBlockingIssues).toBe(false);
 		});
 	});
 
@@ -320,7 +360,7 @@ describe('workflowDocument.store orchestration', () => {
 				id: 'c-1',
 				name: 'Cred',
 				credentialType: 'httpBasicAuth',
-				currentUserHasAccess: true,
+				currentUserCanUse: true,
 			};
 
 			return {
@@ -356,8 +396,11 @@ describe('workflowDocument.store orchestration', () => {
 			const store = useWorkflowDocumentStore(createWorkflowDocumentId('wf-1'));
 			const workflow = buildFullWorkflow();
 
+			expect(store.hydrated).toBe(false);
+
 			store.hydrate(workflow);
 
+			expect(store.hydrated).toBe(true);
 			expect(store.name).toBe('My Workflow');
 			expect(store.description).toBe('Sample description');
 			expect(store.activeVersionId).toBe('ver-123');
@@ -428,6 +471,63 @@ describe('workflowDocument.store orchestration', () => {
 			expect(store.allNodes).toHaveLength(0);
 			expect(store.connectionsBySourceNode).toEqual({});
 			expect(store.pinnedDataByNodeName).toEqual({});
+		});
+
+		it('clears hydrated state on reset', () => {
+			const store = useWorkflowDocumentStore(createWorkflowDocumentId('wf-1'));
+
+			store.hydrate(buildFullWorkflow());
+			store.reset();
+
+			expect(store.hydrated).toBe(false);
+		});
+
+		it('derives homeProject from the shared owner relation when homeProject is absent', () => {
+			// `GET /workflows/:id` omits the assembled `homeProject` when the sharing
+			// license is inactive, returning the raw `shared` relation instead.
+			const store = useWorkflowDocumentStore(createWorkflowDocumentId('wf-shared'));
+			const ownerProject = { id: 'p-owner' } as ProjectSharingData;
+
+			store.hydrate({
+				id: 'wf-shared',
+				name: 'FromShared',
+				active: false,
+				isArchived: false,
+				createdAt: -1,
+				updatedAt: -1,
+				nodes: [],
+				connections: {},
+				versionId: '',
+				activeVersionId: null,
+				shared: [
+					{ role: 'workflow:editor', project: { id: 'p-editor' } as ProjectSharingData },
+					{ role: 'workflow:owner', project: ownerProject },
+				],
+			});
+
+			expect(store.homeProject).toEqual(ownerProject);
+		});
+
+		it('prefers an assembled homeProject over the shared owner relation', () => {
+			const store = useWorkflowDocumentStore(createWorkflowDocumentId('wf-both'));
+			const homeProject = { id: 'p-home' } as ProjectSharingData;
+
+			store.hydrate({
+				id: 'wf-both',
+				name: 'Both',
+				active: false,
+				isArchived: false,
+				createdAt: -1,
+				updatedAt: -1,
+				nodes: [],
+				connections: {},
+				versionId: '',
+				activeVersionId: null,
+				homeProject,
+				shared: [{ role: 'workflow:owner', project: { id: 'p-owner' } as ProjectSharingData }],
+			});
+
+			expect(store.homeProject).toEqual(homeProject);
 		});
 
 		it('normalizes ITag[] tags to string[]', () => {
@@ -615,6 +715,42 @@ describe('workflowDocument.store orchestration', () => {
 		});
 	});
 
+	describe('publicationStatus', () => {
+		it('defaults to idle status and empty failures', () => {
+			const store = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
+
+			expect(store.publicationStatus).toBe('idle');
+			expect(store.publicationFailures).toEqual([]);
+		});
+
+		it('setPublicationStatus updates status and failures', () => {
+			const store = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
+
+			store.setPublicationStatus({
+				status: 'partial',
+				failures: [{ nodeId: 'n1', nodeName: 'A', errorMessage: 'x' }],
+			});
+
+			expect(store.publicationStatus).toBe('partial');
+			expect(store.publicationFailures).toEqual([
+				{ nodeId: 'n1', nodeName: 'A', errorMessage: 'x' },
+			]);
+		});
+
+		it('clears failures when none are provided', () => {
+			const store = useWorkflowDocumentStore(createWorkflowDocumentId('test-wf'));
+
+			store.setPublicationStatus({
+				status: 'partial',
+				failures: [{ nodeId: 'n1', nodeName: 'A', errorMessage: 'x' }],
+			});
+			store.setPublicationStatus({ status: 'published' });
+
+			expect(store.publicationStatus).toBe('published');
+			expect(store.publicationFailures).toEqual([]);
+		});
+	});
+
 	describe('reset', () => {
 		it('clears every document-scoped field back to empty defaults', () => {
 			const store = useWorkflowDocumentStore(createWorkflowDocumentId('wf-reset'));
@@ -681,5 +817,48 @@ describe('workflowDocument.store orchestration', () => {
 			expect(store.allGroups).toEqual([]);
 			expect(store.viewport).toBeNull();
 		});
+	});
+});
+
+describe('provideWorkflowDocumentStore', () => {
+	beforeEach(() => {
+		setActivePinia(createPinia());
+	});
+
+	it('re-provides a resolved store so a descendant injectNDVStore() resolves with no workflow loaded', () => {
+		useWorkflowsStore().setWorkflowId('wf-host');
+
+		let childNdvStore: ReturnType<typeof useNDVStore> | undefined;
+		const Child = defineComponent({
+			setup() {
+				childNdvStore = injectNDVStore().value;
+				return () => null;
+			},
+		});
+		const Host = defineComponent({
+			setup() {
+				// No WorkflowDocumentStoreKey is provided above Host, so this resolves
+				// via the document-store workflowId fallback and re-provides it to Child.
+				provideWorkflowDocumentStore();
+				return () => h(Child);
+			},
+		});
+
+		expect(() => mount(Host)).not.toThrow();
+		expect(childNdvStore).toBe(useNDVStore(createWorkflowDocumentId('wf-host')));
+	});
+
+	it('reset() clears publication status back to idle', () => {
+		const store = useWorkflowDocumentStore(createWorkflowDocumentId('reset-pub'));
+		store.setPublicationStatus({
+			status: 'partial',
+			failures: [{ nodeId: 'n1', nodeName: 'A', errorMessage: 'boom' }],
+		});
+		expect(store.publicationStatus).toBe('partial');
+
+		store.reset();
+
+		expect(store.publicationStatus).toBe('idle');
+		expect(store.publicationFailures).toEqual([]);
 	});
 });

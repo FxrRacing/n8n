@@ -19,6 +19,8 @@
 
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { REMOVED_BUILDER_TOOL_NAMES } from '@n8n/api-types';
+import { isRecord } from '@n8n/utils/is-record';
 import { Client as LangSmithClient } from 'langsmith';
 import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -32,9 +34,11 @@ import {
 } from '../../../ai-workflow-builder.ee/evaluations/evaluators/pairwise';
 import { DEFAULTS } from '../../../ai-workflow-builder.ee/evaluations/support/constants';
 import { N8nClient, type WorkflowResponse } from '../clients/n8n-client';
+import { buildWorkflow } from '../harness/build-workflow';
+import { cleanupBuild } from '../harness/cleanup';
 import { createLogger, type EvalLogger } from '../harness/logger';
-import { buildWorkflow, cleanupBuild } from '../harness/runner';
 import { extractOutcomeFromEvents } from '../outcome/event-parser';
+import { DOMAIN_TOOL_IDS, ORCHESTRATION_TOOL_IDS } from '../../src/tools/tool-ids';
 import type { CapturedEvent, CapturedToolCall } from '../types';
 
 /** Default dataset — orchestrator-plan-derived spec rows. Each row's prompt
@@ -98,7 +102,7 @@ function parseArgs(argv: string[]): PairwiseArgs {
 		timeoutMs:
 			parsePositiveNumber(get('--timeout-ms'), '--timeout-ms') ?? Number(DEFAULTS.TIMEOUT_MS),
 		outputDir: get('--output-dir') ?? defaultOutputDir,
-		judgeModel: get('--judge-model') ?? 'claude-sonnet-4-5-20250929',
+		judgeModel: get('--judge-model') ?? 'claude-sonnet-4-6',
 		experimentName: get('--experiment-name') ?? 'pairwise-evals-instance-ai',
 		verbose: has('--verbose'),
 		baseUrl: get('--base-url') ?? process.env.N8N_EVAL_BASE_URL ?? 'http://localhost:5678',
@@ -247,7 +251,6 @@ interface ExampleRecord {
 
 interface BuildInteractivity {
 	askUserCount: number;
-	planToolCount: number;
 	autoApprovedSuspensions: number;
 	mockedCredentialTypes: string[];
 }
@@ -376,10 +379,8 @@ function buildInteractivity(
 	toolCalls: ToolCallTrace[],
 ): BuildInteractivity {
 	return {
-		askUserCount: toolCalls.filter((toolCall) => toolCall.toolName === 'ask-user').length,
-		planToolCount: toolCalls.filter(
-			(toolCall) => toolCall.toolName === 'plan' || toolCall.toolName === 'create-tasks',
-		).length,
+		askUserCount: toolCalls.filter((toolCall) => toolCall.toolName === DOMAIN_TOOL_IDS.ASK_USER)
+			.length,
 		autoApprovedSuspensions: events.filter((event) => event.type === 'confirmation-request').length,
 		mockedCredentialTypes: [],
 	};
@@ -423,7 +424,6 @@ interface Summary {
 	};
 	interactivity: {
 		askUserCount: number;
-		planToolCount: number;
 		autoApprovedSuspensions: number;
 		mockedCredentialTypes: string[];
 	};
@@ -469,7 +469,6 @@ async function writeOutputs(
 		'buildError',
 		'durationMs',
 		'askUserCount',
-		'planToolCount',
 		'submitCalls',
 		'toolCalls',
 		'toolCallErrors',
@@ -479,7 +478,9 @@ async function writeOutputs(
 	].join(',');
 	const csvRows = records.map((r) => {
 		const find = (m: string) => r.feedback.find((f) => f.metric === m)?.score ?? '';
-		const submits = r.toolCalls.filter((tc) => tc.toolName === 'submit-workflow').length;
+		const submits = r.toolCalls.filter(
+			(tc) => tc.toolName === REMOVED_BUILDER_TOOL_NAMES.SUBMIT_WORKFLOW,
+		).length;
 		const errors = r.toolCalls.filter(isErroredToolCall).length;
 		return [
 			r.exampleId,
@@ -488,7 +489,6 @@ async function writeOutputs(
 			r.build.errorClass ?? '',
 			r.build.durationMs,
 			r.build.interactivity.askUserCount,
-			r.build.interactivity.planToolCount,
 			submits,
 			r.toolCalls.length,
 			errors,
@@ -510,7 +510,6 @@ async function writeOutputs(
 	let diagnosticCount = 0;
 	const allMockedCreds = new Set<string>();
 	let askUserCount = 0;
-	let planToolCount = 0;
 	let autoApprovedSuspensions = 0;
 	let submitCallsTotal = 0;
 	let toolCallsTotal = 0;
@@ -522,7 +521,6 @@ async function writeOutputs(
 			buildFailures[record.build.errorClass] = (buildFailures[record.build.errorClass] ?? 0) + 1;
 		}
 		askUserCount += record.build.interactivity.askUserCount;
-		planToolCount += record.build.interactivity.planToolCount;
 		autoApprovedSuspensions += record.build.interactivity.autoApprovedSuspensions;
 		for (const type of record.build.interactivity.mockedCredentialTypes) {
 			allMockedCreds.add(type);
@@ -537,7 +535,7 @@ async function writeOutputs(
 		for (const tc of record.toolCalls) {
 			toolCallsTotal++;
 			if (isErroredToolCall(tc)) toolCallErrors++;
-			if (tc.toolName === 'submit-workflow') submitCallsTotal++;
+			if (tc.toolName === REMOVED_BUILDER_TOOL_NAMES.SUBMIT_WORKFLOW) submitCallsTotal++;
 		}
 
 		const primary = record.feedback.find((f) => f.metric === 'pairwise_primary')?.score;
@@ -584,7 +582,6 @@ async function writeOutputs(
 		},
 		interactivity: {
 			askUserCount,
-			planToolCount,
 			autoApprovedSuspensions,
 			mockedCredentialTypes: Array.from(allMockedCreds),
 		},
@@ -744,10 +741,6 @@ async function main(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
 
 function safeFilename(s: string): string {
 	return s.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120);

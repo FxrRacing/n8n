@@ -5,12 +5,21 @@ import {
 	testDb,
 	mockInstance,
 } from '@n8n/backend-test-utils';
-import type { User } from '@n8n/db';
+import { WorkflowRepository, type User } from '@n8n/db';
+import { Container } from '@n8n/di';
 import { stringify } from 'flatted';
-import type { INode, IRunExecutionData, IWorkflowBase, WorkflowExecuteMode } from 'n8n-workflow';
+import type {
+	IBinaryKeyData,
+	IDataObject,
+	INode,
+	IRunExecutionData,
+	IWorkflowBase,
+	WorkflowExecuteMode,
+} from 'n8n-workflow';
 import { createRunExecutionData, NodeApiError, NodeOperationError } from 'n8n-workflow';
 
 import { ConcurrencyControlService } from '@/concurrency/concurrency-control.service';
+import { InstanceRedactionEnforcementService } from '@/modules/redaction/instance-redaction-enforcement.service';
 import { WaitTracker } from '@/wait-tracker';
 
 import { createExecution } from './shared/db/executions';
@@ -60,10 +69,27 @@ const BINARY_DATA = {
 	fileName: 'secret.txt',
 };
 
+const STACK_NODE: INode = {
+	id: 'node-1',
+	name: 'Test Node',
+	type: 'n8n-nodes-base.httpRequest',
+	typeVersion: 1,
+	position: [0, 0],
+	parameters: {},
+};
+
+type SensitiveItem = { json: IDataObject; binary?: IBinaryKeyData };
+
 function buildRunExecutionData(opts: {
 	policy?: 'none' | 'non-manual' | 'all';
 	channels?: { production: boolean; manual: boolean };
 	mode?: WorkflowExecuteMode;
+	/** Item to plant in runData (and, with `withStack`, the executionData subtrees). */
+	item?: SensitiveItem;
+	/** Also plant the item in executionData.nodeExecutionStack and waitingExecution. */
+	withStack?: boolean;
+	/** Plant this text in AI Agent metadata and in highlighted data. */
+	metadataText?: string;
 }): IRunExecutionData {
 	const redaction = opts.channels
 		? {
@@ -75,6 +101,53 @@ function buildRunExecutionData(opts: {
 			? { version: 1 as const, policy: opts.policy }
 			: undefined;
 
+	const item: SensitiveItem = opts.item ?? {
+		json: { ...SENSITIVE_JSON },
+		binary: { file: { ...BINARY_DATA } },
+	};
+
+	const runtimeData = redaction
+		? {
+				version: 1 as const,
+				establishedAt: Date.now(),
+				source: opts.mode ?? 'trigger',
+				redaction,
+			}
+		: undefined;
+
+	const taskMetadata = opts.metadataText
+		? {
+				metadata: {
+					subNodeExecutionData: {
+						actions: [
+							{
+								nodeName: 'Tool',
+								runIndex: 0,
+								action: {
+									actionType: 'ExecutionNodeAction' as const,
+									nodeName: 'Tool',
+									input: { query: opts.metadataText },
+									type: 'ai_tool' as const,
+									id: 'call-1',
+									metadata: { itemIndex: 0 },
+								},
+							},
+						],
+						metadata: { previousRequests: [opts.metadataText] },
+					},
+				},
+			}
+		: {};
+
+	const stackSubtrees = opts.withStack
+		? {
+				nodeExecutionStack: [
+					{ node: STACK_NODE, source: null, data: { main: [[{ ...item }]] }, ...taskMetadata },
+				],
+				waitingExecution: { 'Test Node': { 0: { main: [[{ ...item }]] } } },
+			}
+		: undefined;
+
 	return createRunExecutionData({
 		resultData: {
 			runData: {
@@ -85,30 +158,17 @@ function buildRunExecutionData(opts: {
 						executionTime: 0,
 						executionStatus: 'success',
 						source: [],
-						data: {
-							main: [
-								[
-									{
-										json: { ...SENSITIVE_JSON },
-										binary: { file: { ...BINARY_DATA } },
-									},
-								],
-							],
-						},
+						data: { main: [[{ ...item }]] },
+						...taskMetadata,
 					},
 				],
 			},
+			...(opts.metadataText && { metadata: { chatInput: opts.metadataText } }),
 		},
-		executionData: redaction
-			? {
-					runtimeData: {
-						version: 1 as const,
-						establishedAt: Date.now(),
-						source: opts.mode ?? 'trigger',
-						redaction,
-					},
-				}
-			: undefined,
+		executionData:
+			runtimeData || stackSubtrees
+				? { ...(runtimeData && { runtimeData }), ...stackSubtrees }
+				: undefined,
 	});
 }
 
@@ -117,14 +177,24 @@ async function createExecutionWithRedaction(opts: {
 	mode?: WorkflowExecuteMode;
 	policy?: 'none' | 'non-manual' | 'all';
 	channels?: { production: boolean; manual: boolean };
+	item?: SensitiveItem;
+	withStack?: boolean;
+	metadataText?: string;
 }) {
 	const runData = buildRunExecutionData({
 		policy: opts.policy,
 		channels: opts.channels,
 		mode: opts.mode,
+		item: opts.item,
+		withStack: opts.withStack,
+		metadataText: opts.metadataText,
 	});
 	return await createExecution(
-		{ data: stringify(runData), mode: opts.mode ?? 'trigger' },
+		{
+			data: stringify(runData),
+			mode: opts.mode ?? 'trigger',
+			...(opts.metadataText && { metadata: [{ key: 'chatInput', value: opts.metadataText }] }),
+		},
 		opts.workflow,
 	);
 }
@@ -161,6 +231,21 @@ function assertNotRedacted(data: IRunExecutionData) {
 		expect(item.json).toEqual(expect.objectContaining({ secret: 'sensitive-value' }));
 	}
 	expect(data.redactionInfo).toBeUndefined();
+}
+
+// Asserts the executionData subtrees (nodeExecutionStack, waitingExecution) had
+// their item data cleared. Requires the execution to have been built with
+// `withStack: true`.
+function assertStackRedacted(data: IRunExecutionData) {
+	const stackItem = data.executionData!.nodeExecutionStack[0].data.main[0]![0];
+	expect(stackItem.json).toEqual({});
+	expect(stackItem.binary).toBeUndefined();
+	expect(stackItem.redaction).toMatchObject({ redacted: true });
+
+	const waitItem = data.executionData!.waitingExecution['Test Node'][0].main[0]![0];
+	expect(waitItem.json).toEqual({});
+	expect(waitItem.binary).toBeUndefined();
+	expect(waitItem.redaction).toMatchObject({ redacted: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,5 +1100,242 @@ describe('GET /api/v1/executions — Execution Redaction', () => {
 			expect(response.status).toBe(403);
 			expect(response.body.message).toContain('execution:reveal');
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// executionData subtrees (nodeExecutionStack / waitingExecution) redaction
+// ---------------------------------------------------------------------------
+
+describe('executionData subtrees — redaction through DB round-trip', () => {
+	test('REST GET /executions/:id — stack and waiting items are redacted', async () => {
+		const workflow = await createWorkflow({}, owner);
+		const execution = await createExecutionWithRedaction({
+			workflow,
+			mode: 'trigger',
+			policy: 'all',
+			withStack: true,
+		});
+
+		const response = await testServer
+			.authAgentFor(owner)
+			.get(`/executions/${execution.id}`)
+			.expect(200);
+
+		const data = parseResponseData(response.body);
+		assertRedacted(data);
+		assertStackRedacted(data);
+	});
+
+	test('Public API GET /api/v1/executions/:id — stack and waiting items are redacted', async () => {
+		const workflow = await createWorkflow({}, publicApiMember);
+		const execution = await createExecutionWithRedaction({
+			workflow,
+			mode: 'trigger',
+			policy: 'all',
+			withStack: true,
+		});
+
+		const response = await testServer
+			.publicApiAgentFor(publicApiMember)
+			.get(`/executions/${execution.id}?includeData=true`)
+			.expect(200);
+
+		const data = response.body.data as IRunExecutionData;
+		assertRedacted(data, 'workflow_redaction_policy', true);
+		assertStackRedacted(data);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Canary: a sensitive item value planted in every item-bearing subtree must
+// not appear anywhere in a redacted response, on any surface that serves data.
+// ---------------------------------------------------------------------------
+
+describe('sensitive item values are not exposed across surfaces', () => {
+	const SENTINEL_JSON = 'IAM950-SENTINEL-JSON-8f3a2b';
+	const SENTINEL_BINARY = 'IAM950-SENTINEL-BINARY-8f3a2b';
+	// Planted in AI Agent metadata, resultData.metadata and customData.
+	const SENTINEL_METADATA = 'SENTINEL-METADATA-8f3a2b';
+
+	const item: SensitiveItem = {
+		json: { deep: SENTINEL_JSON },
+		binary: { file: { mimeType: 'text/plain', fileName: 'x.txt', data: SENTINEL_BINARY } },
+	};
+
+	// Search the whole serialized response — surface-agnostic, so it catches the
+	// value regardless of which subtree (runData, stack, waiting) or encoding
+	// (flatted string vs. nested object) it hides in.
+	const exposesSentinel = (body: unknown): boolean => {
+		const serialized = JSON.stringify(body);
+		return (
+			serialized.includes(SENTINEL_JSON) ||
+			serialized.includes(SENTINEL_BINARY) ||
+			serialized.includes(SENTINEL_METADATA)
+		);
+	};
+
+	test('REST GET /executions/:id', async () => {
+		const workflow = await createWorkflow({}, owner);
+		const execution = await createExecutionWithRedaction({
+			workflow,
+			mode: 'trigger',
+			policy: 'all',
+			item,
+			withStack: true,
+			metadataText: SENTINEL_METADATA,
+		});
+
+		const response = await testServer
+			.authAgentFor(owner)
+			.get(`/executions/${execution.id}`)
+			.expect(200);
+
+		expect(exposesSentinel(response.body)).toBe(false);
+	});
+
+	test('REST GET /workflows/:workflowId/executions/last-successful', async () => {
+		const workflow = await createWorkflow({}, owner);
+		await createExecutionWithRedaction({
+			workflow,
+			mode: 'trigger',
+			policy: 'all',
+			item,
+			withStack: true,
+			metadataText: SENTINEL_METADATA,
+		});
+
+		const response = await testServer
+			.authAgentFor(owner)
+			.get(`/workflows/${workflow.id}/executions/last-successful`)
+			.expect(200);
+
+		expect(exposesSentinel(response.body)).toBe(false);
+	});
+
+	test('Public API GET /api/v1/executions/:id', async () => {
+		const workflow = await createWorkflow({}, publicApiOwner);
+		const execution = await createExecutionWithRedaction({
+			workflow,
+			mode: 'trigger',
+			policy: 'all',
+			item,
+			withStack: true,
+			metadataText: SENTINEL_METADATA,
+		});
+
+		const response = await testServer
+			.publicApiAgentFor(publicApiOwner)
+			.get(`/executions/${execution.id}?includeData=true`)
+			.expect(200);
+
+		expect(exposesSentinel(response.body)).toBe(false);
+	});
+
+	test('Public API GET /api/v1/executions', async () => {
+		const workflow = await createWorkflow({}, publicApiOwner);
+		await createExecutionWithRedaction({
+			workflow,
+			mode: 'trigger',
+			policy: 'all',
+			item,
+			withStack: true,
+			metadataText: SENTINEL_METADATA,
+		});
+
+		const response = await testServer
+			.publicApiAgentFor(publicApiOwner)
+			.get('/executions?includeData=true')
+			.expect(200);
+
+		expect(exposesSentinel(response.body)).toBe(false);
+	});
+
+	// Guards against a vacuously-green canary: on the reveal path the value must
+	// still be observable, proving the search would catch a real exposure.
+	test('control: revealed (unredacted) response does expose the sentinel', async () => {
+		const workflow = await createWorkflow({}, owner);
+		const execution = await createExecutionWithRedaction({
+			workflow,
+			mode: 'trigger',
+			policy: 'all',
+			item,
+			withStack: true,
+			metadataText: SENTINEL_METADATA,
+		});
+
+		const response = await testServer
+			.authAgentFor(owner)
+			.get(`/executions/${execution.id}`)
+			.query({ redactExecutionData: 'false' })
+			.expect(200);
+
+		expect(exposesSentinel(response.body)).toBe(true);
+		expect(response.body.data.customData).toEqual({ chatInput: SENTINEL_METADATA });
+	});
+});
+
+describe('oversized execution — highlighted data', () => {
+	// Above the default display limit, so the read skips the run data and its runtime snapshot.
+	const OVERSIZED_BYTES = 200 * 1024 * 1024;
+
+	const createOversizedExecution = async (workflow: IWorkflowBase) =>
+		await createExecution(
+			{
+				data: stringify(createRunExecutionData()),
+				mode: 'trigger',
+				jsonSizeBytes: OVERSIZED_BYTES,
+				metadata: [{ key: 'chatInput', value: 'hello' }],
+			},
+			workflow,
+		);
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	test('clears customData when the instance floor redacts production executions', async () => {
+		vi.spyOn(Container.get(InstanceRedactionEnforcementService), 'get').mockResolvedValue(
+			'production',
+		);
+		const workflow = await createWorkflow({}, owner);
+		const execution = await createOversizedExecution(workflow);
+
+		const response = await testServer
+			.authAgentFor(owner)
+			.get(`/executions/${execution.id}`)
+			.expect(200);
+
+		expect(response.body.data.dataTooLargeToDisplay).toBe(true);
+		expect(response.body.data.customData).toEqual({});
+	});
+
+	test('clears customData in the public API when the current workflow settings redact', async () => {
+		const workflow = await createWorkflow({}, publicApiOwner);
+		const execution = await createOversizedExecution(workflow);
+		await Container.get(WorkflowRepository).update(workflow.id, {
+			settings: { redactionPolicy: 'all' },
+		});
+
+		const response = await testServer
+			.publicApiAgentFor(publicApiOwner)
+			.get(`/executions/${execution.id}?includeData=true`)
+			.expect(200);
+
+		expect(response.body.dataTooLargeToDisplay).toBe(true);
+		expect(response.body.customData).toEqual({});
+	});
+
+	test('control: returns customData when no setting redacts the execution', async () => {
+		const workflow = await createWorkflow({}, owner);
+		const execution = await createOversizedExecution(workflow);
+
+		const response = await testServer
+			.authAgentFor(owner)
+			.get(`/executions/${execution.id}`)
+			.expect(200);
+
+		expect(response.body.data.dataTooLargeToDisplay).toBe(true);
+		expect(response.body.data.customData).toEqual({ chatInput: 'hello' });
 	});
 });

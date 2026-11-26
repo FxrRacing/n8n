@@ -1,18 +1,22 @@
 import { Logger } from '@n8n/backend-common';
+import { EventService } from '@n8n/backend-services';
 import { mockInstance } from '@n8n/backend-test-utils';
 import { type CredentialsEntity, type User } from '@n8n/db';
 import { Container } from '@n8n/di';
-import { mock } from 'jest-mock-extended';
 import type { Response } from 'express';
+import { MANAGED_VERSION_KEY } from 'n8n-workflow';
+import { mock } from 'vitest-mock-extended';
+
 import { OAuth1CredentialController } from '@/controllers/oauth/oauth1-credential.controller';
-import { EventService } from '@/events/event.service';
-import type { OAuthRequest } from '@/requests';
-import { OauthService } from '@/oauth/oauth.service';
+import { CredentialsOverwrites } from '@/credentials-overwrites';
 import { ExternalHooks } from '@/external-hooks';
+import { OauthService } from '@/oauth/oauth.service';
+import type { OAuthRequest } from '@/requests';
 
 describe('OAuth1CredentialController', () => {
 	const oauthService = mockInstance(OauthService);
 	const eventService = mockInstance(EventService);
+	const credentialsOverwrites = mockInstance(CredentialsOverwrites);
 
 	mockInstance(Logger);
 	mockInstance(ExternalHooks);
@@ -20,20 +24,20 @@ describe('OAuth1CredentialController', () => {
 	const controller = Container.get(OAuth1CredentialController);
 
 	const timestamp = 1706750625678;
-	jest.useFakeTimers({ advanceTimers: true });
+	vi.useFakeTimers({ shouldAdvanceTime: true });
 
 	const accessTokenData = { oauth_token: 'token', oauth_token_secret: 'secret' };
 
 	beforeEach(() => {
-		jest.setSystemTime(new Date(timestamp));
-		jest.clearAllMocks();
+		vi.setSystemTime(new Date(timestamp));
+		vi.clearAllMocks();
 	});
 
 	describe('getAuthUri', () => {
 		it('should build CSRF state data and return a valid auth URI', async () => {
 			const mockResolvedCredential = mock<CredentialsEntity>({ id: '1' });
 			const mockCsrfData = { cid: '1', origin: 'static-credential' as const, userId: '123' };
-			oauthService.getCredentialForUpdate.mockResolvedValueOnce(mockResolvedCredential);
+			oauthService.getCredentialForAuthFlow.mockResolvedValueOnce(mockResolvedCredential);
 			oauthService.buildCsrfStateData.mockResolvedValueOnce(mockCsrfData);
 			oauthService.generateAOauth1AuthUri.mockResolvedValueOnce(
 				'https://example.domain/oauth/authorize?oauth_token=random-token',
@@ -98,9 +102,10 @@ describe('OAuth1CredentialController', () => {
 			};
 			oauthService.resolveCredential.mockResolvedValueOnce([
 				mockResolvedCredential,
-				{ csrfSecret: 'invalid', oauth_token_secret: 'request-token-secret' },
+				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret', oauthTokenSecret: 'request-token-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 
@@ -130,6 +135,7 @@ describe('OAuth1CredentialController', () => {
 				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 
@@ -143,9 +149,90 @@ describe('OAuth1CredentialController', () => {
 						oauth_token_secret: 'secret',
 					}),
 				}),
-				['csrfSecret', 'oauth_token_secret'],
 			);
 			expect(res.render).toHaveBeenCalledWith('oauth-callback');
+		});
+
+		describe('managed app version', () => {
+			const staticState = {
+				token: 'token',
+				cid: '1',
+				origin: 'static-credential' as const,
+				createdAt: timestamp,
+				data: 'encrypted-data',
+			};
+
+			it('should store the managed app version of the flow with the tokens', async () => {
+				const mockResolvedCredential = mock<CredentialsEntity>({ id: '1' });
+				oauthService.resolveCredential.mockResolvedValueOnce([
+					mockResolvedCredential,
+					{ csrfSecret: 'invalid' },
+					{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
+					staticState,
+					{ csrfSecret: 'csrf-secret', managedVersion: 2 },
+				]);
+				oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
+
+				await controller.handleCallback(req, res);
+
+				expect(oauthService.encryptAndSaveData).toHaveBeenCalledWith(mockResolvedCredential, {
+					oauthTokenData: { ...accessTokenData, [MANAGED_VERSION_KEY]: 2 },
+				});
+			});
+
+			it('should store no version for a flow without a managed app', async () => {
+				const mockResolvedCredential = mock<CredentialsEntity>({ id: '1' });
+				oauthService.resolveCredential.mockResolvedValueOnce([
+					mockResolvedCredential,
+					{ csrfSecret: 'invalid' },
+					{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
+					staticState,
+					{ csrfSecret: 'csrf-secret' },
+				]);
+				oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
+
+				await controller.handleCallback(req, res);
+
+				expect(oauthService.encryptAndSaveData).toHaveBeenCalledWith(mockResolvedCredential, {
+					oauthTokenData: accessTokenData,
+				});
+			});
+
+			it('should pass the managed app version to a dynamic credential', async () => {
+				const mockResolvedCredential = mock<CredentialsEntity>({ id: '1' });
+				const dynamicState = {
+					...staticState,
+					origin: 'dynamic-credential' as const,
+					credentialResolverId: 'resolver-id',
+					authorizationHeader: 'Bearer token123',
+				};
+				const dynamicReq = mock<OAuthRequest.OAuth1Credential.Callback>({
+					query: {
+						oauth_verifier: 'verifier',
+						oauth_token: 'token',
+						state: Buffer.from(JSON.stringify(dynamicState)).toString('base64'),
+					},
+				});
+				oauthService.resolveCredential.mockResolvedValueOnce([
+					mockResolvedCredential,
+					{ csrfSecret: 'invalid' },
+					{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
+					dynamicState,
+					{ csrfSecret: 'csrf-secret', managedVersion: 2 },
+				]);
+				oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
+				oauthService.saveDynamicCredential.mockResolvedValueOnce(undefined);
+
+				await controller.handleCallback(dynamicReq, res);
+
+				expect(oauthService.saveDynamicCredential).toHaveBeenCalledWith(
+					mockResolvedCredential,
+					{ ...accessTokenData, [MANAGED_VERSION_KEY]: 2 },
+					'token123',
+					'resolver-id',
+					{},
+				);
+			});
 		});
 
 		it('should handle dynamic credential callback successfully', async () => {
@@ -173,6 +260,7 @@ describe('OAuth1CredentialController', () => {
 				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 			oauthService.saveDynamicCredential.mockResolvedValueOnce(undefined);
@@ -226,9 +314,12 @@ describe('OAuth1CredentialController', () => {
 				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 			oauthService.saveDynamicCredential.mockResolvedValueOnce(undefined);
+			credentialsOverwrites.supportsManagedAuth.mockReturnValue(true);
+			credentialsOverwrites.usesManagedAuth.mockReturnValue(false);
 
 			await controller.handleCallback(dynamicReq, res);
 
@@ -236,6 +327,8 @@ describe('OAuth1CredentialController', () => {
 				user: { id: 'user-42' },
 				credentialType: 'twitterOAuth1Api',
 				credentialId: 'cred-1',
+				supportsManagedAuth: true,
+				usesManagedAuth: false,
 			});
 		});
 
@@ -263,6 +356,7 @@ describe('OAuth1CredentialController', () => {
 				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 
@@ -299,6 +393,7 @@ describe('OAuth1CredentialController', () => {
 				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 
@@ -336,6 +431,7 @@ describe('OAuth1CredentialController', () => {
 				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 
@@ -371,6 +467,7 @@ describe('OAuth1CredentialController', () => {
 				{ csrfSecret: 'invalid' },
 				{ accessTokenUrl: 'https://example.domain/oauth/access_token' },
 				mockState,
+				{ csrfSecret: 'csrf-secret' },
 			]);
 			oauthService.getOAuth1AccessToken.mockResolvedValueOnce(accessTokenData);
 
@@ -384,7 +481,6 @@ describe('OAuth1CredentialController', () => {
 						oauth_token_secret: 'secret',
 					}),
 				}),
-				['csrfSecret', 'oauth_token_secret'],
 			);
 			expect(res.render).toHaveBeenCalledWith('oauth-callback');
 		});

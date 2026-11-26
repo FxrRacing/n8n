@@ -1,9 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { INode, INodeCredentials, INodeTypeDescription } from 'n8n-workflow';
+import { NodeHelpers } from 'n8n-workflow';
+import type { INode, INodeCredentials, INodeParameters, INodeTypeDescription } from 'n8n-workflow';
 
 import { AI_MCP_TOOL_NODE_TYPE } from '@/app/constants/nodeTypes';
 import type { AgentJsonMcpServerConfig } from '../types';
-import type { McpAuthenticationSchemaType } from '@n8n/api-types';
+import type { McpAuthenticationSchemaType, McpToolPermissions } from '@n8n/api-types';
 
 const MCP_REGISTRY_NODE_PREFIX = '@n8n/mcp-registry.';
 const HTTP_STREAMABLE_TRANSPORT = 'httpStreamable';
@@ -25,12 +26,6 @@ function toServerTransport(transport: unknown): AgentJsonMcpServerConfig['transp
 	return transport === 'sse' ? 'sse' : 'streamableHttp';
 }
 
-function toArray(value: unknown): string[] {
-	return Array.isArray(value)
-		? value.filter((item): item is string => typeof item === 'string')
-		: [];
-}
-
 function toNumber(value: unknown): number | undefined {
 	return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
@@ -47,12 +42,25 @@ function slugify(value: string): string {
 	return normalized || 'mcp-server';
 }
 
-function resolveDefaultParameter(nodeType: INodeTypeDescription, name: string): unknown {
-	const property = nodeType.properties.find((candidate) => candidate.name === name);
-	if (!property || !('default' in property)) {
-		return undefined;
-	}
-	return property.default;
+/**
+ * Materializes the node type's default parameter values at its latest version.
+ * Several node properties are declared multiple times under the same name, each
+ * gated to a different `@version` range (e.g. the MCP `serverTransport` default
+ * is `sse` on v1.1 but `httpStreamable` from v1.2 on); `getNodeParameters`
+ * resolves which declaration applies. `returnNoneDisplayed` keeps defaults of
+ * parameters hidden behind other conditions (e.g. `sseEndpoint`).
+ */
+function resolveDefaultParameters(nodeType: INodeTypeDescription): INodeParameters {
+	return (
+		NodeHelpers.getNodeParameters(
+			nodeType.properties,
+			{},
+			true,
+			true,
+			{ typeVersion: pickLatestVersion(nodeType.version) },
+			nodeType,
+		) ?? {}
+	);
 }
 
 function resolveDefaultTimeout(nodeType: INodeTypeDescription): number | undefined {
@@ -83,6 +91,14 @@ const AUTHENTICATION_TO_CREDENTIAL_TYPE: Record<string, string | undefined> = {
 	none: 'none',
 } satisfies Record<McpAuthenticationSchemaType, string | undefined>;
 
+const CREDENTIAL_TYPE_TO_AUTHENTICATION: Record<string, string | undefined> = {
+	httpBearerAuth: 'bearerAuth',
+	httpHeaderAuth: 'headerAuth',
+	httpMultipleHeadersAuth: 'multipleHeadersAuth',
+	mcpOAuth2Api: 'mcpOAuth2Api',
+	none: 'none',
+} satisfies Record<string, McpAuthenticationSchemaType | undefined>;
+
 function authenticationToCredentialType(authentication: string): string | undefined {
 	return AUTHENTICATION_TO_CREDENTIAL_TYPE[authentication] ?? authentication;
 }
@@ -101,15 +117,16 @@ function resolveCredentialId(credentials: INodeCredentials | undefined): string 
 
 function resolveAuthenticationFromNode(node: INode): string {
 	const authentication = toStringValue(node.parameters.authentication);
-	if (authentication) return authentication;
+	// for mcp registry nodes use credential name directly
+	if (authentication && !isMcpRegistryNodeType(node.type)) return authentication;
 
 	const credentialType = resolveCredentialType(node.credentials);
-	if (credentialType) return credentialType;
+	if (credentialType) return CREDENTIAL_TYPE_TO_AUTHENTICATION[credentialType] ?? credentialType;
 
 	return 'none';
 }
 
-function isMcpRegistryNodeType(nodeTypeName: string): boolean {
+export function isMcpRegistryNodeType(nodeTypeName: string): boolean {
 	return nodeTypeName.startsWith(MCP_REGISTRY_NODE_PREFIX);
 }
 
@@ -132,9 +149,12 @@ function resolveMetadata(
 	return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
-function resolveDefaultAuthentication(nodeType: INodeTypeDescription): string {
-	const authentication = resolveDefaultParameter(nodeType, 'authentication');
-	if (typeof authentication === 'string' && authentication.length > 0) {
+function resolveDefaultAuthentication(
+	nodeType: INodeTypeDescription,
+	defaults: INodeParameters,
+): string {
+	const authentication = toStringValue(defaults.authentication);
+	if (authentication) {
 		return authentication;
 	}
 
@@ -146,49 +166,29 @@ function resolveDefaultAuthentication(nodeType: INodeTypeDescription): string {
 	return 'none';
 }
 
-function resolveNodeToolFilter(
-	toolFilter: AgentJsonMcpServerConfig['toolFilter'],
-): Pick<INode['parameters'], 'include' | 'includeTools' | 'excludeTools'> {
-	if (!toolFilter) {
-		return { include: 'all', includeTools: [], excludeTools: [] };
-	}
-
-	if (toolFilter.mode === 'allow') {
-		return { include: 'selected', includeTools: toolFilter.tools, excludeTools: [] };
-	}
-
-	return { include: 'except', includeTools: [], excludeTools: toolFilter.tools };
-}
-
-function resolveServerToolFilter(
-	parameters: INode['parameters'],
-): AgentJsonMcpServerConfig['toolFilter'] {
-	const includeMode = parameters.include;
-	const includeTools = toArray(parameters.includeTools);
-	const excludeTools = toArray(parameters.excludeTools);
-
-	if (includeMode === 'selected') {
-		return { mode: 'allow', tools: includeTools };
-	}
-
-	if (includeMode === 'except') {
-		return { mode: 'exclude', tools: excludeTools };
-	}
-
-	return undefined;
-}
-
 export function isMcpRelatedNodeType(nodeTypeName: string): boolean {
 	return isMcpClientNodeType(nodeTypeName) || isMcpRegistryNodeType(nodeTypeName);
 }
 
-export function nodeTypeToNewMcpServer(nodeType: INodeTypeDescription): AgentJsonMcpServerConfig {
-	const endpointUrlDefault = resolveDefaultParameter(nodeType, 'endpointUrl');
-	const sseEndpointDefault = resolveDefaultParameter(nodeType, 'sseEndpoint');
-	const endpointUrl = toStringValue(endpointUrlDefault) ?? toStringValue(sseEndpointDefault) ?? '';
+export function defaultAgentMcpToolPermissions(supportsApproval = true): McpToolPermissions {
+	return {
+		categories: {
+			read: 'always_allow',
+			write: supportsApproval ? 'require_approval' : 'always_allow',
+		},
+	};
+}
 
-	const authentication = resolveDefaultAuthentication(nodeType);
-	const serverTransport = resolveDefaultParameter(nodeType, 'serverTransport');
+export function nodeTypeToNewMcpServer(
+	nodeType: INodeTypeDescription,
+	supportsApproval = true,
+): AgentJsonMcpServerConfig {
+	const defaults = resolveDefaultParameters(nodeType);
+	const endpointUrl =
+		toStringValue(defaults.endpointUrl) ?? toStringValue(defaults.sseEndpoint) ?? '';
+
+	const authentication = resolveDefaultAuthentication(nodeType, defaults);
+	const serverTransport = defaults.serverTransport;
 	const metadata = isMcpRegistryNodeType(nodeType.name)
 		? { nodeTypeName: nodeType.name }
 		: undefined;
@@ -200,7 +200,20 @@ export function nodeTypeToNewMcpServer(nodeType: INodeTypeDescription): AgentJso
 		authentication,
 		connectionTimeoutMs: resolveDefaultTimeout(nodeType),
 		metadata,
+		toolPermissions: defaultAgentMcpToolPermissions(supportsApproval),
 	};
+}
+
+function resolveAuthenticationParameterFromCredentialType(
+	credentialType: string,
+	nodeTypeDescription: INodeTypeDescription,
+) {
+	const credentials = nodeTypeDescription.credentials;
+	const credential = credentials?.find((credential) => credential.name === credentialType);
+	const showCondition = credential?.displayOptions?.show?.authentication?.[0];
+	// node type with authentication selector store the authentication option in the displayOptions.show.authentication
+	// single auth method nodes don't have "authentication" parameter
+	return showCondition ? showCondition : undefined;
 }
 
 export function mcpServerToNode(
@@ -217,8 +230,10 @@ export function mcpServerToNode(
 					},
 				}
 			: undefined;
-	const toolFilterParams = resolveNodeToolFilter(server.toolFilter);
 	const options = server.connectionTimeoutMs ? { timeout: server.connectionTimeoutMs } : {};
+	const authentication = isMcpRegistryNodeType(nodeTypeDescription.name)
+		? resolveAuthenticationParameterFromCredentialType(server.authentication, nodeTypeDescription)
+		: server.authentication;
 
 	return {
 		id: uuidv4(),
@@ -228,8 +243,7 @@ export function mcpServerToNode(
 		parameters: {
 			endpointUrl: server.url,
 			serverTransport: toNodeTransport(server.transport),
-			authentication: server.authentication,
-			...toolFilterParams,
+			authentication,
 			options,
 		},
 		credentials,
@@ -256,9 +270,8 @@ export function nodeToMcpServer(
 		transport: toServerTransport(node.parameters.serverTransport),
 		authentication,
 		credential,
-		toolFilter: resolveServerToolFilter(node.parameters),
 		description: original?.description,
-		approval: original?.approval,
+		toolPermissions: original?.toolPermissions ?? defaultAgentMcpToolPermissions(),
 		connectionTimeoutMs: timeout,
 		metadata: resolveMetadata(node.type, original),
 	};

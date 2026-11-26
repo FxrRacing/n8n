@@ -2,7 +2,7 @@ import type { CreateProjectDto } from '@n8n/api-types';
 import { ProjectRelationRepository, ProjectRepository, RoleRepository, type User } from '@n8n/db';
 import { Service } from '@n8n/di';
 
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
+import { BadRequestError } from '@n8n/errors';
 
 const PROJECT_ADMIN = 'project:admin';
 

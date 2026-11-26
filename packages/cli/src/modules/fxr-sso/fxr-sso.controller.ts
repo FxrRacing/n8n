@@ -1,11 +1,12 @@
+import { SSO_ERROR_LOGIN_FAILED, SSO_ERROR_QUERY_PARAM } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
+import { UrlService } from '@n8n/backend-services';
 import { Get, RestController } from '@n8n/decorators';
+import { validateRedirectUrl } from '@n8n/utils/validate-redirect-url';
 import type { Response } from 'express';
 
 import { AuthService } from '@/auth/auth.service';
 import { AuthlessRequest } from '@/requests';
-import { UrlService } from '@/services/url.service';
-import { validateRedirectUrl } from '@/utils/validate-redirect-url';
 
 import { FxrSsoService, toOAuthError } from './fxr-sso.service';
 
@@ -35,7 +36,7 @@ export class FxrSsoController {
 	async login(req: AuthlessRequest, res: Response) {
 		if (!(await this.ssoService.isConfigured())) {
 			this.logger.warn('FXR SSO: login requested but SSO is not configured');
-			return this.failToSignin(res, 'sso_not_configured');
+			return this.failToSignin(res);
 		}
 		const query = req.query as Record<string, string | undefined>;
 		const redirect = validateRedirectUrl(query.redirect ?? '');
@@ -58,7 +59,7 @@ export class FxrSsoController {
 			this.logger.warn('FXR SSO: callback received without state cookie', {
 				callbackUrl: this.ssoService.callbackUrl,
 			});
-			return this.failToSignin(res, 'sso_state_missing');
+			return this.failToSignin(res);
 		}
 
 		try {
@@ -72,13 +73,17 @@ export class FxrSsoController {
 				message,
 				callbackUrl: this.ssoService.callbackUrl,
 			});
-			return this.failToSignin(res, 'sso_failed', message);
+			return this.failToSignin(res);
 		}
 	}
 
-	private failToSignin(res: Response, code: string, message?: string) {
-		const params = new URLSearchParams({ ssoError: code });
-		if (message) params.set('ssoMessage', message.slice(0, 500));
+	/**
+	 * Sends the browser back to the sign-in page with n8n's own SSO failure code, so the page
+	 * shows its standard message. The cause is only written to the server log: the provider's
+	 * message is untrusted and never put in the URL.
+	 */
+	private failToSignin(res: Response) {
+		const params = new URLSearchParams({ [SSO_ERROR_QUERY_PARAM]: SSO_ERROR_LOGIN_FAILED });
 		return res.redirect(`${this.urlService.getInstanceBaseUrl()}/signin?${params.toString()}`);
 	}
 }

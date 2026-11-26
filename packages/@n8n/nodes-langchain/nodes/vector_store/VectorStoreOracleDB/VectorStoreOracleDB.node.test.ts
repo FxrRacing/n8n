@@ -4,8 +4,9 @@ import type { Embeddings } from '@langchain/core/embeddings';
 import type { VectorStore } from '@langchain/core/vectorstores';
 import type { VectorStoreNodeConstructorArgs } from '@n8n/ai-utilities';
 import { ConnectionPoolManager } from 'n8n-nodes-base/dist/utils/connection-pool-manager';
-import type { IExecuteFunctions } from 'n8n-workflow';
+import type { IExecuteFunctions, INode } from 'n8n-workflow';
 import type { Pool } from 'oracledb';
+import type { Mocked } from 'vitest';
 
 type OracleFilter = Record<string, unknown>;
 
@@ -322,16 +323,19 @@ vi.mock('@n8n/ai-utilities', () => {
 import { VectorStoreOracleDB } from './VectorStoreOracleDB.node';
 
 describe('VectorStoreOracleDB.node', () => {
+	const node = { name: 'Oracle Database Vector Store', type: 'vectorStoreOracleDBVector' } as INode;
+
 	const context = {
-		getNodeParameter: jest.fn(),
-		getCredentials: jest.fn(),
+		getNodeParameter: vi.fn(),
+		getCredentials: vi.fn(),
+		getNode: vi.fn(() => node),
 		logger: {
-			debug: jest.fn(),
-			error: jest.fn(),
-			info: jest.fn(),
-			warn: jest.fn(),
+			debug: vi.fn(),
+			error: vi.fn(),
+			info: vi.fn(),
+			warn: vi.fn(),
 		},
-	} as unknown as jest.Mocked<IExecuteFunctions>;
+	} as unknown as Mocked<IExecuteFunctions>;
 
 	const embeddings = {} as Embeddings;
 	const documents: Array<Document<Record<string, unknown>>> = [
@@ -361,7 +365,7 @@ describe('VectorStoreOracleDB.node', () => {
 	const createNode = () => new VectorStoreOracleDB() as unknown as TestNodeInstance;
 
 	beforeEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 		createdPools.length = 0;
 		poolCloseMocks.length = 0;
 		connectionCloseMocks.length = 0;
@@ -410,7 +414,7 @@ describe('VectorStoreOracleDB.node', () => {
 
 		expect(mockCreatePool).toHaveBeenCalledTimes(1);
 		expect(createdPools).toHaveLength(1);
-		const poolConfig = mockCreatePool.mock.calls[0]![0];
+		const poolConfig = mockCreatePool.mock.calls[0][0];
 		expect(poolConfig).toMatchObject({
 			user: 'user',
 			password: 'pw',
@@ -562,7 +566,7 @@ describe('VectorStoreOracleDB.node', () => {
 			throw new Error('releaseVectorStoreClient was not captured');
 		}
 
-		const clientCloseSpy = jest
+		const clientCloseSpy = vi
 			.spyOn(lastInstance.client as { close: () => Promise<void> }, 'close')
 			.mockResolvedValue(undefined);
 
@@ -592,5 +596,105 @@ describe('VectorStoreOracleDB.node', () => {
 		expect(connectionCloseMocks[0]).toHaveBeenCalledTimes(1);
 		expect(connectionCloseMocks[1]).toHaveBeenCalledTimes(1);
 		expect(poolCloseMocks[0]).not.toHaveBeenCalled();
+	});
+
+	describe('parameter validation', () => {
+		const withTableName = (tableName: string) => (name: string) => {
+			if (name === 'tableName') return tableName;
+			if (name === 'options.distanceStrategy') return DistanceStrategyMock.DOT_PRODUCT;
+			return undefined;
+		};
+
+		it('rejects a metadata filter name that is not a plain identifier', async () => {
+			const node = createNode();
+
+			await expect(
+				node.getVectorStoreClient(context, { "userId'": 'alice' } as OracleFilter, embeddings, 0),
+			).rejects.toThrow('Invalid metadata filter key');
+			expect(initializeSpy).not.toHaveBeenCalled();
+		});
+
+		it('rejects a metadata filter name supplied at search time', async () => {
+			const node = createNode();
+			const vectorStore = await node.getVectorStoreClient(context, undefined, embeddings, 0);
+
+			await expect(
+				vectorStore.similaritySearchVectorWithScore([0.1], 3, {
+					'userId?(@ == "bob")': 'alice',
+				} as OracleFilter),
+			).rejects.toThrow('Invalid metadata filter key');
+			expect(similaritySearchSpy).not.toHaveBeenCalled();
+		});
+
+		it('rejects a metadata filter name nested under $and at search time', async () => {
+			const node = createNode();
+			const vectorStore = await node.getVectorStoreClient(context, undefined, embeddings, 0);
+
+			await expect(
+				vectorStore.similaritySearchVectorWithScore([0.1], 3, {
+					$and: [{ project: 'n8n' }, { 'a.b': 'x' }],
+				} as OracleFilter),
+			).rejects.toThrow('Invalid metadata filter key');
+			expect(similaritySearchSpy).not.toHaveBeenCalled();
+		});
+
+		it('accepts a filter whose names are plain identifiers', async () => {
+			const node = createNode();
+			const filter = { userId: 'alice', user_id: 'alice' } as OracleFilter;
+
+			const vectorStore = await node.getVectorStoreClient(context, filter, embeddings, 0);
+			await vectorStore.similaritySearchVectorWithScore([0.1], 3, undefined);
+
+			expect(similaritySearchSpy).toHaveBeenCalledWith([0.1], 3, filter);
+		});
+
+		it('rejects a table name that is not a plain identifier', async () => {
+			const node = createNode();
+			context.getNodeParameter.mockImplementation(withTableName('n8n_vectors; SELECT 1'));
+
+			await expect(node.getVectorStoreClient(context, undefined, embeddings, 0)).rejects.toThrow(
+				'Invalid table name',
+			);
+
+			context.getNodeParameter.mockImplementation(defaultGetNodeParameter);
+		});
+
+		it('rejects a table name that is not a plain identifier when inserting', async () => {
+			const node = createNode();
+			context.getNodeParameter.mockImplementation(withTableName('n8n_vectors; SELECT 1'));
+
+			await expect(node.populateVectorStore(context, embeddings, documents, 0)).rejects.toThrow(
+				'Invalid table name',
+			);
+			expect(fromDocumentsSpy).not.toHaveBeenCalled();
+
+			context.getNodeParameter.mockImplementation(defaultGetNodeParameter);
+		});
+
+		it('accepts a schema-qualified table name', async () => {
+			const node = createNode();
+			context.getNodeParameter.mockImplementation(withTableName('app.n8n_vectors'));
+
+			await node.getVectorStoreClient(context, undefined, embeddings, 0);
+
+			const lastCall = initializeSpy.mock.calls.at(-1);
+			if (!lastCall) throw new Error('initializeSpy should have been called');
+			expect(lastCall[1]?.tableName).toBe('app.n8n_vectors');
+
+			context.getNodeParameter.mockImplementation(defaultGetNodeParameter);
+		});
+
+		it('falls back to the default table name when the parameter resolves to empty', async () => {
+			const node = createNode();
+			context.getNodeParameter.mockImplementation(withTableName(''));
+
+			await node.getVectorStoreClient(context, undefined, embeddings, 0);
+
+			const lastCall = initializeSpy.mock.calls.at(-1);
+			if (!lastCall) throw new Error('initializeSpy should have been called');
+			expect(lastCall[1]?.tableName).toBe('n8n_vectors');
+
+			context.getNodeParameter.mockImplementation(defaultGetNodeParameter);
+		});
 	});
 });

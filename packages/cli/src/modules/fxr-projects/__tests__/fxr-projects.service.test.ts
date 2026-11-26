@@ -7,9 +7,9 @@ import type {
 	RoleRepository,
 	User,
 } from '@n8n/db';
-import { mock } from 'jest-mock-extended';
+import { mock } from 'vitest-mock-extended';
 
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
+import { BadRequestError } from '@n8n/errors';
 
 import { FxrProjectsService } from '../fxr-projects.service';
 
@@ -31,7 +31,7 @@ describe('FxrProjectsService', () => {
 	const ownerRole = mock<Role>({ slug: 'global:owner', scopes: [{ slug: 'project:create' }] });
 
 	beforeEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 		roleRepository.findBySlug.mockImplementation(async (slug) =>
 			slug === 'project:admin' ? adminRole : slug === 'global:owner' ? ownerRole : null,
 		);

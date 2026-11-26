@@ -1,4 +1,6 @@
+import { packagedModules } from '@/modules/modules.manifest';
 import type { SourceControlledFile } from '@n8n/api-types';
+import { EventService } from '@n8n/backend-services';
 import { createTeamProject, createWorkflow, testDb, testModules } from '@n8n/backend-test-utils';
 import {
 	CredentialsEntity,
@@ -7,24 +9,21 @@ import {
 	GLOBAL_CHAT_USER_ROLE,
 	GLOBAL_MEMBER_ROLE,
 	GLOBAL_OWNER_ROLE,
+	type Person,
 	Project,
 	type TagEntity,
-	type User,
 	WorkflowEntity,
 } from '@n8n/db';
 import { Container } from '@n8n/di';
-import { createCredentials } from '@test-integration/db/credentials';
-import { createDataTable } from '@test-integration/db/data-tables';
-import { createFolder } from '@test-integration/db/folders';
-import { assignTagToWorkflow, createTag, updateTag } from '@test-integration/db/tags';
-import { createUser } from '@test-integration/db/users';
 import * as fastGlob from 'fast-glob';
-import { mock } from 'jest-mock-extended';
 import { Cipher } from 'n8n-core';
-import fsp from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute } from 'node:path';
+import type { Mock } from 'vitest';
+import { mock } from 'vitest-mock-extended';
 
-import { DataTable } from '@/modules/data-table/data-table.entity';
+import { BadRequestError, ForbiddenError } from '@n8n/errors';
+import { DataTable } from '@n8n/backend-module-data-table';
 import {
 	SOURCE_CONTROL_CREDENTIAL_EXPORT_FOLDER,
 	SOURCE_CONTROL_DATATABLES_EXPORT_FOLDER,
@@ -32,11 +31,11 @@ import {
 	SOURCE_CONTROL_TAGS_EXPORT_FILE,
 	SOURCE_CONTROL_WORKFLOW_EXPORT_FOLDER,
 } from '@/modules/source-control.ee/constants';
+import { SourceControlContextFactory } from '@/modules/source-control.ee/source-control-context.factory';
 import { SourceControlExportService } from '@/modules/source-control.ee/source-control-export.service.ee';
 import type { SourceControlGitService } from '@/modules/source-control.ee/source-control-git.service.ee';
 import { SourceControlImportService } from '@/modules/source-control.ee/source-control-import.service.ee';
 import { SourceControlPreferencesService } from '@/modules/source-control.ee/source-control-preferences.service.ee';
-import { SourceControlContextFactory } from '@/modules/source-control.ee/source-control-context.factory';
 import { SourceControlScopedService } from '@/modules/source-control.ee/source-control-scoped.service';
 import { SourceControlStatusService } from '@/modules/source-control.ee/source-control-status.service.ee';
 import { SourceControlService } from '@/modules/source-control.ee/source-control.service.ee';
@@ -45,11 +44,23 @@ import type { ExportableDataTable } from '@/modules/source-control.ee/types/expo
 import type { ExportableFolder } from '@/modules/source-control.ee/types/exportable-folders';
 import type { ExportableWorkflow } from '@/modules/source-control.ee/types/exportable-workflow';
 import type { RemoteResourceOwner } from '@/modules/source-control.ee/types/resource-owner';
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { EventService } from '@/events/event.service';
+import { createCredentials } from '@test-integration/db/credentials';
+import { createDataTable } from '@test-integration/db/data-tables';
+import { createFolder } from '@test-integration/db/folders';
+import { assignTagToWorkflow, createTag, updateTag } from '@test-integration/db/tags';
+import { createUser } from '@test-integration/db/users';
 
-jest.mock('fast-glob');
+vi.mock('fast-glob');
+
+// `readFile`/`writeFile` are imported as named bindings by the service, which `vi.spyOn` on a
+// default/namespace import can't intercept under Vitest. Mock them at the module level and keep
+// the other fs/promises exports real.
+vi.mock('node:fs/promises', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('node:fs/promises')>();
+	const readFile = vi.fn(actual.readFile);
+	const writeFile = vi.fn(actual.writeFile);
+	return { ...actual, readFile, writeFile, default: { ...actual, readFile, writeFile } };
+});
 
 type Scope = {
 	workflows: WorkflowEntity[];
@@ -73,7 +84,7 @@ function toExportableFolder(folder: Folder): ExportableFolder {
 
 function toExportableCredential(
 	cred: CredentialsEntity,
-	owner: Project | User,
+	owner: Project | Person,
 ): ExportableCredential {
 	let resourceOwner: RemoteResourceOwner;
 
@@ -102,7 +113,7 @@ function toExportableCredential(
 
 function toExportableWorkflow(
 	wf: WorkflowEntity,
-	owner: Project | User,
+	owner: Project | Person,
 	versionId?: string,
 ): ExportableWorkflow {
 	let resourceOwner: RemoteResourceOwner;
@@ -123,6 +134,7 @@ function toExportableWorkflow(
 	return {
 		id: wf.id,
 		name: wf.name,
+		description: wf.description ?? null,
 		connections: wf.connections,
 		isArchived: wf.isArchived,
 		nodes: wf.nodes,
@@ -134,7 +146,7 @@ function toExportableWorkflow(
 	};
 }
 
-function toExportableDataTable(table: DataTable, owner: Project | User): ExportableDataTable {
+function toExportableDataTable(table: DataTable, owner: Project | Person): ExportableDataTable {
 	let resourceOwner: NonNullable<ExportableDataTable['ownedBy']>;
 
 	if (owner instanceof Project) {
@@ -187,11 +199,11 @@ describe('SourceControlService', () => {
 				TBD!
 		*/
 
-	let globalAdmin: User;
-	let globalOwner: User;
-	let globalMember: User;
-	let globalChatUser: User;
-	let projectAdmin: User;
+	let globalAdmin: Person;
+	let globalOwner: Person;
+	let globalMember: Person;
+	let globalChatPerson: Person;
+	let projectAdmin: Person;
 
 	let projectA: Project;
 	let projectB: Project;
@@ -228,15 +240,14 @@ describe('SourceControlService', () => {
 
 	let cipher: Cipher;
 
-	const globMock = fastGlob.default as unknown as jest.Mock<
-		Promise<string[]>,
-		[fastGlob.Pattern | fastGlob.Pattern[], fastGlob.Options]
+	const globMock = fastGlob.default as unknown as Mock<
+		(...args: [fastGlob.Pattern | fastGlob.Pattern[], fastGlob.Options]) => Promise<string[]>
 	>;
-	const fsReadFile = jest.spyOn(fsp, 'readFile');
-	const fsWriteFile = jest.spyOn(fsp, 'writeFile');
+	const fsReadFile = vi.mocked(readFile);
+	const fsWriteFile = vi.mocked(writeFile);
 
 	beforeAll(async () => {
-		await testModules.loadModules(['data-table']);
+		await testModules.loadModules(['data-table'], packagedModules);
 		await testDb.init();
 
 		cipher = Container.get(Cipher);
@@ -269,7 +280,7 @@ describe('SourceControlService', () => {
 				1. Workflow moved in git to other project
 			*/
 
-		[globalAdmin, globalOwner, globalMember, projectAdmin, globalChatUser] = await Promise.all([
+		[globalAdmin, globalOwner, globalMember, projectAdmin, globalChatPerson] = await Promise.all([
 			createUser({ role: GLOBAL_ADMIN_ROLE }),
 			createUser({ role: GLOBAL_OWNER_ROLE }),
 			createUser({ role: GLOBAL_MEMBER_ROLE }),
@@ -330,14 +341,14 @@ describe('SourceControlService', () => {
 		deletedInScopeCredential = Object.assign(new CredentialsEntity(), {
 			id: 'deletedInScope',
 			name: 'deletedInScope',
-			data: cipher.encrypt({}),
+			data: cipher.encryptWithInstanceKey({}),
 			type: '',
 		});
 
 		deletedOutOfScopeCredential = Object.assign(new CredentialsEntity(), {
 			id: 'deletedOutOfScope',
 			name: 'deletedOutOfScope',
-			data: cipher.encrypt({}),
+			data: cipher.encryptWithInstanceKey({}),
 			type: '',
 		});
 
@@ -346,11 +357,11 @@ describe('SourceControlService', () => {
 			movedIntoScopeCredential,
 			movedOutOfScopeWorkflow,
 			movedIntoScopeWorkflow,
-		] = await Promise.all([
+		] = [
 			await createCredentials(
 				{
 					name: 'OutOfScope',
-					data: cipher.encrypt({}),
+					data: cipher.encryptWithInstanceKey({}),
 					type: '',
 				},
 				projectB,
@@ -358,7 +369,7 @@ describe('SourceControlService', () => {
 			await createCredentials(
 				{
 					name: 'IntoScope',
-					data: cipher.encrypt({}),
+					data: cipher.encryptWithInstanceKey({}),
 					type: '',
 				},
 				projectA,
@@ -375,14 +386,14 @@ describe('SourceControlService', () => {
 				},
 				projectA,
 			),
-		]);
+		];
 
 		const [projectACredentials, projectBCredentials] = await Promise.all(
 			[projectA, projectB].map(async (project) => [
 				await createCredentials(
 					{
 						name: `${project.name}-CredA`,
-						data: cipher.encrypt({}),
+						data: cipher.encryptWithInstanceKey({}),
 						type: '',
 					},
 					project,
@@ -390,7 +401,7 @@ describe('SourceControlService', () => {
 				await createCredentials(
 					{
 						name: `${project.name}-CredB‚`,
-						data: cipher.encrypt({}),
+						data: cipher.encryptWithInstanceKey({}),
 						type: '',
 					},
 					project,
@@ -533,7 +544,6 @@ describe('SourceControlService', () => {
 		service.sanityCheck = async () => {};
 		statusService['resetWorkfolder'] = async () => undefined;
 		(statusService as any).gitService = gitService;
-		(gitService.getHistoricallyTrackedFiles as jest.Mock).mockResolvedValue(new Set<string>());
 
 		// Git mocking
 		gitFiles = {
@@ -810,7 +820,7 @@ describe('SourceControlService', () => {
 			describe('global:chatUser user', () => {
 				it('should not be allowed to get push status', async () => {
 					await expect(
-						service.getStatus(globalChatUser, {
+						service.getStatus(globalChatPerson, {
 							direction: 'push',
 							preferLocalVersion: true,
 							verbose: false,
@@ -952,10 +962,21 @@ describe('SourceControlService', () => {
 
 					const dataTables = result.filter((r) => r.type === 'datatable');
 
+					// Local in-scope tables are offered as creations, the in-scope
+					// remote-only table as a deletion (git holds it, the instance doesn't)
 					expect(new Set(dataTables.map((dataTable) => dataTable.id))).toEqual(
-						new Set(projectAScope.dataTables.map((dataTable) => dataTable.id)),
+						new Set([
+							...projectAScope.dataTables.map((dataTable) => dataTable.id),
+							remoteInScopeDataTable.id,
+						]),
 					);
-					expect(dataTables.every((dataTable) => dataTable.status === 'created')).toBe(true);
+					expect(
+						dataTables.every((dataTable) =>
+							dataTable.id === remoteInScopeDataTable.id
+								? dataTable.status === 'deleted'
+								: dataTable.status === 'created',
+						),
+					).toBe(true);
 					expect(
 						dataTables.some((dataTable) =>
 							projectBScope.dataTables.some((outOfScope) => outOfScope.id === dataTable.id),
@@ -967,14 +988,7 @@ describe('SourceControlService', () => {
 
 		describe('remote data tables', () => {
 			describe('project:Admin user', () => {
-				it('should see only tracked remote data tables in correct scope', async () => {
-					(gitService.getHistoricallyTrackedFiles as jest.Mock).mockResolvedValueOnce(
-						new Set([
-							`${SOURCE_CONTROL_DATATABLES_EXPORT_FOLDER}/${remoteInScopeDataTable.id}.json`,
-							`${SOURCE_CONTROL_DATATABLES_EXPORT_FOLDER}/${remoteOutOfScopeDataTable.id}.json`,
-						]),
-					);
-
+				it('should see only remote data tables in correct scope', async () => {
 					const result = await service.getStatus(projectAdmin, {
 						direction: 'push',
 						preferLocalVersion: true,
@@ -1400,7 +1414,7 @@ describe('SourceControlService', () => {
 	});
 
 	describe('isGlobal flag modification detection', () => {
-		let testGlobalOwner: User;
+		let testGlobalOwner: Person;
 		let testProject: Project;
 
 		beforeAll(async () => {
@@ -1454,7 +1468,7 @@ describe('SourceControlService', () => {
 				{
 					name: 'Test Credential isGlobal false->true',
 					type: 'testType',
-					data: cipher.encrypt({}),
+					data: cipher.encryptWithInstanceKey({}),
 					isGlobal: false,
 				},
 				testProject,
@@ -1485,7 +1499,7 @@ describe('SourceControlService', () => {
 				{
 					name: 'Test Credential isGlobal true->false',
 					type: 'testType',
-					data: cipher.encrypt({}),
+					data: cipher.encryptWithInstanceKey({}),
 					isGlobal: true,
 				},
 				testProject,
@@ -1513,7 +1527,7 @@ describe('SourceControlService', () => {
 				{
 					name: 'Test Credential isGlobal undefined vs false',
 					type: 'testType',
-					data: cipher.encrypt({}),
+					data: cipher.encryptWithInstanceKey({}),
 					isGlobal: false,
 				},
 				testProject,
@@ -1541,7 +1555,7 @@ describe('SourceControlService', () => {
 				{
 					name: 'Test Credential isGlobal undefined->true',
 					type: 'testType',
-					data: cipher.encrypt({}),
+					data: cipher.encryptWithInstanceKey({}),
 					isGlobal: false,
 				},
 				testProject,
@@ -1569,7 +1583,7 @@ describe('SourceControlService', () => {
 				{
 					name: 'Test Credential isGlobal same value',
 					type: 'testType',
-					data: cipher.encrypt({}),
+					data: cipher.encryptWithInstanceKey({}),
 					isGlobal: true,
 				},
 				testProject,

@@ -3,16 +3,18 @@
  * Eliminates duplication across agent tools and the service layer.
  */
 
-/** Type guard for plain objects. */
-export function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+import { unwrapToolCatalogCall } from '@n8n/api-types';
+import { isRecord } from '@n8n/utils/is-record';
 
 /** Parsed suspension data from a `tool-call-suspended` chunk. */
 export interface SuspensionInfo {
 	toolCallId: string;
 	requestId: string;
 	toolName?: string;
+	/** The tool that suspended. Differs from `toolName` when the tool catalog's `call_tool` ran it. */
+	targetToolName?: string;
+	/** Run id of the (sub-)agent run that suspended, from the `tool-call-suspended` chunk. */
+	runId?: string;
 	/** The raw suspend payload as passed to `ctx.suspend()` by the inner tool. */
 	suspendPayload: Record<string, unknown>;
 }
@@ -29,9 +31,20 @@ export function parseSuspension(chunk: unknown): SuspensionInfo | null {
 			? suspPayload.requestId
 			: tcId;
 	const toolName = typeof sp.toolName === 'string' ? sp.toolName : undefined;
+	const runId = typeof sp.runId === 'string' ? sp.runId : undefined;
+	const targetToolName = toolName
+		? unwrapToolCatalogCall(toolName, isRecord(sp.input) ? sp.input : {}).toolName
+		: undefined;
 
 	if (!reqId || !tcId) return null;
-	return { toolCallId: tcId, requestId: reqId, toolName, suspendPayload: suspPayload };
+	return {
+		toolCallId: tcId,
+		requestId: reqId,
+		toolName,
+		...(targetToolName && targetToolName !== toolName ? { targetToolName } : {}),
+		runId,
+		suspendPayload: suspPayload,
+	};
 }
 
 export interface Resumable {

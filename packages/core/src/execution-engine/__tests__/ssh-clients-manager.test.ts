@@ -40,6 +40,12 @@ afterEach(() => {
 	sshClientsManager.onShutdown();
 });
 
+it('should not keep the process alive for the stale-connection cleanup timer', () => {
+	const { cleanupTimer } = sshClientsManager as unknown as { cleanupTimer: NodeJS.Timeout };
+
+	expect(cleanupTimer.hasRef()).toBe(false);
+});
+
 describe('getClient', () => {
 	it('should create a new SSH client', async () => {
 		const client = await sshClientsManager.getClient(credentials);
@@ -109,6 +115,33 @@ describe('onShutdown', () => {
 		// ASSERT
 		expect(endSpy).toHaveBeenCalledTimes(1);
 	});
+
+	it('should not throw on process exit when constructed without a logger', () => {
+		// ARRANGE
+		const managerWithoutLogger = new SSHClientsManager(
+			mock({ idleTimeout }),
+			undefined as unknown as Logger,
+		);
+
+		// ACT & ASSERT
+		expect(() => managerWithoutLogger.onShutdown()).not.toThrow();
+	});
+
+	it('should deregister its exit handler on shutdown', async () => {
+		// ARRANGE
+		const before = process.listenerCount('exit');
+		const manager = new SSHClientsManager(
+			mock({ idleTimeout }),
+			mock<Logger>({ scoped: () => mock<Logger>() }),
+		);
+		expect(process.listenerCount('exit')).toBe(before + 1);
+
+		// ACT
+		manager.onShutdown();
+
+		// ASSERT
+		expect(process.listenerCount('exit')).toBe(before);
+	});
 });
 
 describe('cleanup', () => {
@@ -151,6 +184,26 @@ describe('cleanup', () => {
 
 			// ASSERT 1
 			expect(endSpy).toHaveBeenCalledTimes(1);
+		});
+
+		test("updateLastUsed on a cleaned-up client does not delay the replacement's idle cleanup", async () => {
+			// ARRANGE
+			const cleanedUpAbortController = new AbortController();
+			const cleanedUpClient = await sshClientsManager.getClient(
+				credentials,
+				cleanedUpAbortController,
+			);
+			cleanedUpAbortController.abort();
+			const replacementAbortController = new AbortController();
+			await sshClientsManager.getClient(credentials, replacementAbortController);
+			vi.advanceTimersByTime((idleTimeout - 1) * 1000);
+
+			// ACT
+			sshClientsManager.updateLastUsed(cleanedUpClient);
+			vi.advanceTimersByTime(idleTimeout * 1000);
+
+			// ASSERT
+			expect(replacementAbortController.signal.aborted).toBe(true);
 		});
 	});
 });
@@ -206,6 +259,75 @@ describe('abort controller', () => {
 		// ASSERT 1
 		expect(endSpy).toHaveBeenCalledTimes(1);
 	});
+
+	test('does not close a shared client while another caller still uses it', async () => {
+		// ARRANGE
+		const firstAbortController = new AbortController();
+		const secondAbortController = new AbortController();
+		await sshClientsManager.getClient(credentials, firstAbortController);
+		await sshClientsManager.getClient(credentials, secondAbortController);
+
+		// ACT 1
+		firstAbortController.abort();
+
+		// ASSERT 1
+		expect(endSpy).not.toHaveBeenCalled();
+		expect(secondAbortController.signal.aborted).toBe(false);
+	});
+
+	test('closes a shared client once every caller has aborted', async () => {
+		// ARRANGE
+		const firstAbortController = new AbortController();
+		const secondAbortController = new AbortController();
+		await sshClientsManager.getClient(credentials, firstAbortController);
+		await sshClientsManager.getClient(credentials, secondAbortController);
+
+		// ACT 1
+		firstAbortController.abort();
+		secondAbortController.abort();
+
+		// ASSERT 1
+		expect(endSpy).toHaveBeenCalledTimes(1);
+	});
+
+	test('aborts every caller when a shared client closes', async () => {
+		// ARRANGE
+		const firstAbortController = new AbortController();
+		const secondAbortController = new AbortController();
+		const client = await sshClientsManager.getClient(credentials, firstAbortController);
+		await sshClientsManager.getClient(credentials, secondAbortController);
+
+		// ACT 1
+		client.emit('close');
+
+		// ASSERT 1
+		expect(firstAbortController.signal.aborted).toBe(true);
+		expect(secondAbortController.signal.aborted).toBe(true);
+		expect(endSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('replacement client', () => {
+	test.each(['end', 'close', 'error'])(
+		'ignores a late `%s` from a client that was already cleaned up',
+		async (event) => {
+			// ARRANGE
+			const cleanedUpAbortController = new AbortController();
+			const cleanedUpClient = await sshClientsManager.getClient(
+				credentials,
+				cleanedUpAbortController,
+			);
+			cleanedUpAbortController.abort();
+			const replacementAbortController = new AbortController();
+			await sshClientsManager.getClient(credentials, replacementAbortController);
+
+			// ACT
+			cleanedUpClient.emit(event, new Error());
+
+			// ASSERT
+			expect(replacementAbortController.signal.aborted).toBe(false);
+		},
+	);
 });
 
 describe('SSHClientsConfig', () => {

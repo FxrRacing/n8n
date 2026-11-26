@@ -1,18 +1,20 @@
+import { requestPath } from 'n8n-workflow';
+
 import { TrelloTrigger } from '../TrelloTrigger.node';
 
-jest.mock('../TrelloTriggerHelpers', () => ({
-	verifySignature: jest.fn(),
+vi.mock('../TrelloTriggerHelpers', () => ({
+	verifySignature: vi.fn(),
 }));
 
-jest.mock('../GenericFunctions', () => ({
-	apiRequest: jest.fn(),
+vi.mock('../GenericFunctions', () => ({
+	apiRequest: vi.fn(),
 }));
 
 import { apiRequest } from '../GenericFunctions';
 import { verifySignature } from '../TrelloTriggerHelpers';
 
-const mockedVerifySignature = jest.mocked(verifySignature);
-const mockedApiRequest = jest.mocked(apiRequest);
+const mockedVerifySignature = vi.mocked(verifySignature);
+const mockedApiRequest = vi.mocked(apiRequest);
 
 describe('TrelloTrigger', () => {
 	let trelloTrigger: TrelloTrigger;
@@ -20,21 +22,21 @@ describe('TrelloTrigger', () => {
 	let mockRes: any;
 
 	beforeEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 		trelloTrigger = new TrelloTrigger();
 
 		mockRes = {
-			status: jest.fn().mockReturnThis(),
-			send: jest.fn().mockReturnThis(),
-			end: jest.fn().mockReturnThis(),
+			status: vi.fn().mockReturnThis(),
+			send: vi.fn().mockReturnThis(),
+			end: vi.fn().mockReturnThis(),
 		};
 
 		mockWebhookFunctions = {
-			getWebhookName: jest.fn().mockReturnValue('default'),
-			getBodyData: jest.fn().mockReturnValue({ action: { type: 'createCard' } }),
-			getResponseObject: jest.fn().mockReturnValue(mockRes),
+			getWebhookName: vi.fn().mockReturnValue('default'),
+			getBodyData: vi.fn().mockReturnValue({ action: { type: 'createCard' } }),
+			getResponseObject: vi.fn().mockReturnValue(mockRes),
 			helpers: {
-				returnJsonArray: jest.fn().mockImplementation((data) => [{ json: data }]),
+				returnJsonArray: vi.fn().mockImplementation((data) => [{ json: data }]),
 			},
 		};
 	});
@@ -91,13 +93,13 @@ describe('TrelloTrigger', () => {
 			staticData = { webhookId: 'existing-webhook-id' };
 
 			mockHookFunctions = {
-				getNodeParameter: jest.fn((name: string) => {
+				getNodeParameter: vi.fn((name: string) => {
 					if (name === 'authentication') return 'oAuth1';
 					if (name === 'id') return idModel;
 					return undefined;
 				}),
-				getNodeWebhookUrl: jest.fn().mockReturnValue(webhookUrl),
-				getWorkflowStaticData: jest.fn().mockReturnValue(staticData),
+				getNodeWebhookUrl: vi.fn().mockReturnValue(webhookUrl),
+				getWorkflowStaticData: vi.fn().mockReturnValue(staticData),
 			};
 		});
 
@@ -112,7 +114,11 @@ describe('TrelloTrigger', () => {
 
 			expect(result).toBe(true);
 			expect(mockedApiRequest).toHaveBeenCalledTimes(1);
-			expect(mockedApiRequest).toHaveBeenCalledWith('GET', 'webhooks/existing-webhook-id', {});
+			expect(mockedApiRequest).toHaveBeenCalledWith(
+				'GET',
+				requestPath`webhooks/existing-webhook-id`,
+				{},
+			);
 			expect(staticData.webhookId).toBe('existing-webhook-id');
 		});
 
@@ -131,13 +137,13 @@ describe('TrelloTrigger', () => {
 			expect(mockedApiRequest).toHaveBeenNthCalledWith(
 				1,
 				'GET',
-				'webhooks/existing-webhook-id',
+				requestPath`webhooks/existing-webhook-id`,
 				{},
 			);
 			expect(mockedApiRequest).toHaveBeenNthCalledWith(
 				2,
 				'DELETE',
-				'webhooks/existing-webhook-id',
+				requestPath`webhooks/existing-webhook-id`,
 				{},
 			);
 			expect(staticData.webhookId).toBeUndefined();

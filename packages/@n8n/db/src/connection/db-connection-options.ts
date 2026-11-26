@@ -4,7 +4,7 @@ import { Service } from '@n8n/di';
 import type { DataSourceOptions, LoggerOptions } from '@n8n/typeorm';
 import type { PostgresConnectionOptions } from '@n8n/typeorm/driver/postgres/PostgresConnectionOptions';
 import type { SqlitePooledConnectionOptions } from '@n8n/typeorm/driver/sqlite-pooled/SqlitePooledConnectionOptions';
-import { UserError } from 'n8n-workflow';
+import { UserError } from '@n8n/errors';
 import type { TlsOptions } from 'node:tls';
 import path from 'path';
 
@@ -123,6 +123,12 @@ export class DbConnectionOptions {
 								Math.round(postgresConfig.maxConnectionLifetimeMs / 1000),
 							),
 						}
+					: {}),
+				// Bound how long acquiring a connection from the pool can wait (waiting for a free
+				// slot, or for a new connection to be established). Without it, pg-pool waits
+				// indefinitely. Reuse the existing connect-timeout knob rather than adding a new env var.
+				...(postgresConfig.connectionTimeoutMs > 0
+					? { connectionTimeoutMillis: postgresConfig.connectionTimeoutMs }
 					: {}),
 			},
 		};

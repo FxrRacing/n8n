@@ -4,8 +4,8 @@ import { GLOBAL_ADMIN_ROLE, GLOBAL_MEMBER_ROLE, GLOBAL_OWNER_ROLE, type User } f
 import { Container } from '@n8n/di';
 
 import { SourceControlPreferencesService } from '@/modules/source-control.ee/source-control-preferences.service.ee';
-import { SourceControlService } from '@/modules/source-control.ee/source-control.service.ee';
 import { SourceControlStatusService } from '@/modules/source-control.ee/source-control-status.service.ee';
+import { SourceControlService } from '@/modules/source-control.ee/source-control.service.ee';
 import { Telemetry } from '@/telemetry';
 
 import { createUser } from '../shared/db/users';
@@ -54,11 +54,12 @@ describe('Source Control API', () => {
 			branchColor: '#ff6d5a',
 			branchReadOnly: false,
 			keyGeneratorType: 'rsa',
+			environmentsVersion: 'v1',
 		});
 	});
 
 	afterEach(() => {
-		jest.restoreAllMocks();
+		vi.restoreAllMocks();
 	});
 
 	describe('GET /source-control/preferences', () => {
@@ -79,11 +80,11 @@ describe('Source Control API', () => {
 			expect(data.publicKey).toEqual(expect.stringMatching(/^ssh-/));
 		});
 
-		test('should return only branch read-only state to members without source-control access', async () => {
+		test('should return only the branch read-only state and the environments version to members without source-control access', async () => {
 			const res = await authMemberAgent.get('/source-control/preferences').expect(200);
 			const data = res.body.data ?? res.body;
 
-			expect(data).toEqual({ branchReadOnly: false });
+			expect(data).toEqual({ branchReadOnly: false, environmentsVersion: 'v1' });
 		});
 
 		test('should return safe branch metadata to project admins', async () => {
@@ -95,6 +96,7 @@ describe('Source Control API', () => {
 				branchName: 'main',
 				branchColor: '#ff6d5a',
 				branchReadOnly: false,
+				environmentsVersion: 'v1',
 			});
 			expect(data.repositoryUrl).toBeUndefined();
 			expect(data.publicKey).toBeUndefined();
@@ -116,6 +118,59 @@ describe('Source Control API', () => {
 				.patch('/source-control/preferences')
 				.send({ branchReadOnly: true })
 				.expect(403);
+		});
+
+		describe('when source control is disconnected', () => {
+			beforeAll(async () => {
+				await sourceControlPreferencesService.setPreferences({ connected: false });
+			});
+
+			afterAll(async () => {
+				await sourceControlPreferencesService.setPreferences({
+					connected: true,
+					repositoryUrl: 'git@github.com:n8n-io/source-control-test.git',
+					branchName: 'main',
+					branchColor: '#ff6d5a',
+					branchReadOnly: false,
+					environmentsVersion: 'v1',
+				});
+			});
+
+			test('should protect the instance when only branchReadOnly is sent', async () => {
+				const res = await authOwnerAgent
+					.patch('/source-control/preferences')
+					.send({ branchReadOnly: true })
+					.expect(200);
+				expect((res.body.data ?? res.body).branchReadOnly).toBe(true);
+
+				const memberRes = await authMemberAgent.get('/source-control/preferences').expect(200);
+				expect((memberRes.body.data ?? memberRes.body).branchReadOnly).toBe(true);
+			});
+
+			test('owner sets the environments version and members read it', async () => {
+				const res = await authOwnerAgent
+					.patch('/source-control/preferences')
+					.send({ environmentsVersion: 'v2' })
+					.expect(200);
+				expect((res.body.data ?? res.body).environmentsVersion).toBe('v2');
+
+				const memberRes = await authMemberAgent.get('/source-control/preferences').expect(200);
+				expect((memberRes.body.data ?? memberRes.body).environmentsVersion).toBe('v2');
+			});
+
+			test('a disconnect keeps the environments version', async () => {
+				await authOwnerAgent
+					.patch('/source-control/preferences')
+					.send({ environmentsVersion: 'v2' })
+					.expect(200);
+				await authOwnerAgent
+					.post('/source-control/disconnect')
+					.send({ keepKeyPair: true })
+					.expect(200);
+
+				const res = await authOwnerAgent.get('/source-control/preferences').expect(200);
+				expect((res.body.data ?? res.body).environmentsVersion).toBe('v2');
+			});
 		});
 	});
 
@@ -182,7 +237,7 @@ describe('Source Control API', () => {
 					updatedAt: '2023-07-14T11:24:41.000Z',
 				},
 			];
-			const pullWorkfolderSpy = jest
+			const pullWorkfolderSpy = vi
 				.spyOn(Container.get(SourceControlService), 'pullWorkfolder')
 				.mockResolvedValue({ statusCode: 200, statusResult });
 
@@ -199,7 +254,7 @@ describe('Source Control API', () => {
 
 	describe('GET /source-control/get-status', () => {
 		test('should return repo sync status', async () => {
-			jest.spyOn(Container.get(SourceControlService), 'getStatus').mockResolvedValue([
+			vi.spyOn(Container.get(SourceControlService), 'getStatus').mockResolvedValue([
 				{
 					id: 'haQetoXq9GxHSkft',
 					name: 'My workflow 6 edit',
@@ -225,7 +280,7 @@ describe('Source Control API', () => {
 
 		describe('access control', () => {
 			beforeEach(() => {
-				jest.spyOn(Container.get(SourceControlService), 'sanityCheck').mockResolvedValue();
+				vi.spyOn(Container.get(SourceControlService), 'sanityCheck').mockResolvedValue();
 			});
 
 			test.each([
@@ -258,7 +313,7 @@ describe('Source Control API', () => {
 						updatedAt: '2023-07-14T11:24:41.000Z',
 					},
 				];
-				const getStatusSpy = jest
+				const getStatusSpy = vi
 					.spyOn(Container.get(SourceControlStatusService), 'getStatus')
 					.mockResolvedValue(statusResult);
 

@@ -1,5 +1,8 @@
 import type { SharedWorkflow, IWorkflowDb, WorkflowPublishHistory, WorkflowHistory } from '@n8n/db';
 import {
+	accountFullName,
+	isPerson,
+	isServiceAccount,
 	Project,
 	User,
 	ProjectRepository,
@@ -7,6 +10,10 @@ import {
 	WorkflowRepository,
 	WorkflowHistoryRepository,
 	WorkflowPublishHistoryRepository,
+	WorkflowPublishedVersionRepository,
+	WorkflowDependencies,
+	WorkflowDependencyRepository,
+	WebhookRepository,
 } from '@n8n/db';
 import { Container } from '@n8n/di';
 import type { WorkflowSharingRole } from '@n8n/permissions';
@@ -43,6 +50,27 @@ export function newWorkflow(attributes: Partial<IWorkflowDb> = {}): IWorkflowDb 
 	return workflowEntity;
 }
 
+async function populateWorkflowDependencies(workflow: IWorkflowDb) {
+	const dependencies = new WorkflowDependencies(workflow.id, workflow.versionCounter);
+
+	for (const node of workflow.nodes) {
+		if (node.type) {
+			dependencies.add({
+				dependencyType: 'nodeType',
+				dependencyKey: node.type,
+				dependencyInfo: { nodeId: node.id, nodeVersion: node.typeVersion },
+			});
+		}
+	}
+
+	if (dependencies.dependencies.length > 0) {
+		await Container.get(WorkflowDependencyRepository).updateDependenciesForWorkflow(
+			workflow.id,
+			dependencies,
+		);
+	}
+}
+
 /**
  * Store a workflow in the DB (without a trigger) and optionally assign it to a user.
  * @param attributes workflow attributes
@@ -76,6 +104,8 @@ export async function createWorkflow(
 			}),
 		);
 	}
+
+	await populateWorkflowDependencies(workflow);
 
 	return workflow;
 }
@@ -165,7 +195,13 @@ export async function createWorkflowWithTrigger(
 				},
 				{
 					id: 'uuid-2',
-					parameters: { triggerTimes: { item: [{ mode: 'everyMinute' }] } },
+					// Deliberately a schedule that cannot fire during a test run. Suites
+					// that don't mock `ActiveWorkflowManager` register this with the real
+					// `ScheduledTaskManager`, and an `everyMinute` tick starts a real
+					// execution that outlives the test that activated the workflow.
+					parameters: {
+						triggerTimes: { item: [{ mode: 'everyMonth', hour: 0, minute: 0, dayOfMonth: 1 }] },
+					},
 					name: 'Cron',
 					type: 'n8n-nodes-base.cron',
 					typeVersion: 1,
@@ -245,18 +281,22 @@ export const getWorkflowById = async (id: string) =>
  * @param withPublishHistory publish history to create (optional)
  * @param autosaved whether this is an autosave (optional)
  */
+/** The author name that workflow history records: a service account by its name, a person by first and last name. */
+function historyAuthor(user: User): string {
+	if (isServiceAccount(user)) return accountFullName(user);
+	if (isPerson(user) && user.firstName && user.lastName) {
+		return `${user.firstName} ${user.lastName}`;
+	}
+	return 'Test User';
+}
+
 export async function createWorkflowHistory(
 	workflow: IWorkflowDb,
 	userOrProject?: User | Project,
 	withPublishHistory?: Partial<WorkflowPublishHistory>,
 	overrides: Partial<WorkflowHistory> = {},
 ): Promise<void> {
-	const authors =
-		userOrProject instanceof User
-			? userOrProject.firstName && userOrProject.lastName
-				? `${userOrProject.firstName} ${userOrProject.lastName}`
-				: 'Test User'
-			: 'Test User';
+	const authors = userOrProject instanceof User ? historyAuthor(userOrProject) : 'Test User';
 
 	const repo = Container.get(WorkflowHistoryRepository);
 	await repo.insert(
@@ -316,8 +356,21 @@ export async function createActiveWorkflow(
 	);
 
 	await setActiveVersion(workflow.id, workflow.versionId);
+	// The publication service serves webhooks and sub-workflow calls from this
+	// mapping, so a "running" fixture needs it as well as `activeVersionId`.
+	await Container.get(WorkflowPublishedVersionRepository).setPublishedVersion(
+		workflow.id,
+		workflow.versionId,
+	);
 
 	workflow.activeVersionId = workflow.versionId;
 
 	return workflow;
+}
+
+export async function deleteWorkflowAndWebhooks(workflowId: string) {
+	// RESTRICT FK: the mapping must go before the workflow row.
+	await Container.get(WorkflowPublishedVersionRepository).removePublishedVersion(workflowId);
+	await Container.get(WorkflowRepository).delete({ id: workflowId });
+	await Container.get(WebhookRepository).delete({ workflowId });
 }

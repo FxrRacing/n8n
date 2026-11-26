@@ -1,15 +1,16 @@
 import { Logger } from '@n8n/backend-common';
-import { AuthIdentity, AuthIdentityRepository, UserRepository, type User } from '@n8n/db';
+import { JwtService } from '@n8n/backend-services';
+import { AuthIdentity, AuthIdentityRepository, PersonRepository, type Person } from '@n8n/db';
 import { Service } from '@n8n/di';
+import { ForbiddenError } from '@n8n/errors';
 import * as client from 'openid-client';
-
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { JwtService } from '@/services/jwt.service';
 
 import { FxrSsoSettingsService, type FxrSsoEffectiveConfig } from './fxr-sso-settings.service';
 
 const PROVIDER_TYPE = 'oidc' as const;
 const STATE_TTL_SECONDS = 600;
+/** The login state cookie is an OIDC state token, so it is signed for n8n's OIDC state audience. */
+const STATE_TOKEN_PURPOSE = 'oidcState' as const;
 /** Users created through SSO never log in with a password. */
 const NO_PASSWORD_PLACEHOLDER = '!fxr-sso-no-password';
 
@@ -70,7 +71,7 @@ export class FxrSsoService {
 	constructor(
 		private readonly settings: FxrSsoSettingsService,
 		private readonly logger: Logger,
-		private readonly userRepository: UserRepository,
+		private readonly personRepository: PersonRepository,
 		private readonly authIdentityRepository: AuthIdentityRepository,
 		private readonly jwtService: JwtService,
 	) {}
@@ -181,7 +182,9 @@ export class FxrSsoService {
 		});
 
 		const payload: LoginState = { codeVerifier, nonce, state, redirect };
-		const stateToken = this.jwtService.sign(payload, { expiresIn: STATE_TTL_SECONDS });
+		const stateToken = this.jwtService.sign(STATE_TOKEN_PURPOSE, payload, {
+			expiresIn: STATE_TTL_SECONDS,
+		});
 		return { authorizationUrl: authorizationUrl.href, stateToken };
 	}
 
@@ -189,8 +192,8 @@ export class FxrSsoService {
 	async completeLogin(
 		callbackUrl: URL,
 		stateToken: string,
-	): Promise<{ user: User; redirect: string }> {
-		const loginState = this.jwtService.verify<LoginState>(stateToken);
+	): Promise<{ user: Person; redirect: string }> {
+		const loginState = this.jwtService.verify<LoginState>(STATE_TOKEN_PURPOSE, stateToken);
 		const configuration = await this.getConfiguration();
 
 		const tokens = await client.authorizationCodeGrant(configuration, callbackUrl, {
@@ -202,7 +205,7 @@ export class FxrSsoService {
 
 		const rawClaims = tokens.claims();
 		if (!rawClaims) throw new ForbiddenError('Identity provider returned no ID token claims');
-		const claims = claimsFromIdToken(rawClaims as Record<string, unknown>);
+		const claims = claimsFromIdToken(rawClaims);
 		if (!claims.sub || !claims.email) {
 			throw new ForbiddenError('Identity provider did not return a subject and email');
 		}
@@ -212,7 +215,7 @@ export class FxrSsoService {
 	}
 
 	/** Identity by sub → existing user by email → auto-provision. */
-	async resolveUser(claims: SsoClaims): Promise<User> {
+	async resolveUser(claims: SsoClaims): Promise<Person> {
 		const config = await this.settings.getEffective();
 		if (!emailDomainAllowed(claims.email, config.allowedDomains)) {
 			this.logger.warn('FXR SSO: sign-in refused for email outside allowed domains', {
@@ -223,17 +226,16 @@ export class FxrSsoService {
 
 		const identity = await this.authIdentityRepository.findOne({
 			where: { providerId: claims.sub, providerType: PROVIDER_TYPE },
-			relations: { user: { role: true } },
 		});
-		if (identity?.user) {
-			if (identity.user.disabled) throw new ForbiddenError('This account is disabled');
-			return identity.user;
+		if (identity) {
+			// Only a person signs in through SSO; a service account never matches here.
+			const linked = await this.personRepository.findByIdWithRole(identity.userId);
+			if (!linked) throw new ForbiddenError('No n8n account is linked to this identity');
+			if (linked.disabled) throw new ForbiddenError('This account is disabled');
+			return linked;
 		}
 
-		const existing = await this.userRepository.findOne({
-			where: { email: claims.email },
-			relations: ['role', 'authIdentities'],
-		});
+		const existing = await this.personRepository.findByEmailWithAuthIdentities(claims.email);
 		if (existing) {
 			if (existing.disabled) throw new ForbiddenError('This account is disabled');
 			await this.authIdentityRepository.save(
@@ -247,8 +249,8 @@ export class FxrSsoService {
 			throw new ForbiddenError('No n8n account exists for this email. Ask an admin to invite you.');
 		}
 
-		const user = await this.userRepository.manager.transaction(async (trx) => {
-			const { user: created } = await this.userRepository.createUserWithProject(
+		const user = await this.authIdentityRepository.manager.transaction(async (trx) => {
+			const { user: created } = await this.personRepository.createPersonWithProject(
 				{
 					email: claims.email,
 					firstName: claims.givenName?.trim() || 'FXR',

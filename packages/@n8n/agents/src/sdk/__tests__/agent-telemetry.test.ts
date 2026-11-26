@@ -71,11 +71,23 @@ describe('Agent telemetry', () => {
 		const firstCall = generateText.mock.calls[0][0] as Record<string, unknown>;
 
 		const secondCall = generateText.mock.calls[1][0] as Record<string, unknown>;
-		const firstTelemetry = firstCall.experimental_telemetry as Record<string, unknown>;
-		const secondTelemetry = secondCall.experimental_telemetry as Record<string, unknown>;
+		const firstTelemetry = firstCall.telemetry as Record<string, unknown>;
+		const secondTelemetry = secondCall.telemetry as Record<string, unknown>;
 
 		expect(firstTelemetry.functionId).toBe('initial-agent');
 		expect(secondTelemetry.functionId).toBe('updated-agent');
-		expect(secondTelemetry.metadata).toEqual({ functionId: 'updated-agent' });
 	});
+});
+
+describe('Agent.functionId', () => {
+	it('accepts ids made of letters, digits, dots, dashes and underscores', () => {
+		expect(() => new Agent('a').functionId('instance-ai.orchestrator_v2')).not.toThrow();
+	});
+
+	it.each(['', 'has space', 'naïve', 'line\nbreak'])(
+		'rejects %j, which fetch cannot send as a header',
+		(id) => {
+			expect(() => new Agent('a').functionId(id)).toThrow(/functionId/);
+		},
+	);
 });

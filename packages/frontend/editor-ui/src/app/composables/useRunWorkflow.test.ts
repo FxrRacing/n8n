@@ -17,16 +17,19 @@ import { useRunWorkflow } from '@/app/composables/useRunWorkflow';
 import { chatEventBus } from '@n8n/chat/event-buses';
 import { useChat } from '@n8n/chat/composables';
 import type { INodeUi, IStartRunData } from '@/Interface';
-import type { IExecutionResponse } from '@/features/execution/executions/executions.types';
+import type {
+	IExecutionResponse,
+	IExecutionsStopData,
+} from '@/features/execution/executions/executions.types';
 import type { WorkflowData } from '@n8n/rest-api-client/api/workflows';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
 import { useWorkflowExecutionStateStore } from '@/app/stores/workflowExecutionState.store';
 import { createWorkflowDocumentId } from '@/app/stores/workflowDocument.store';
 import { useUIStore } from '@/app/stores/ui.store';
-import { useToast } from '@/app/composables/useToast';
+import { useToast } from '@n8n/composables/useToast';
 import { useWorkflowHelpers } from '@/app/composables/useWorkflowHelpers';
 import { useWorkflowSaving } from '@/app/composables/useWorkflowSaving';
-import { useSettingsStore } from '@/app/stores/settings.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import { captor, mock } from 'vitest-mock-extended';
 import { usePushConnectionStore } from '@/app/stores/pushConnection.store';
 import { createTestNode, createTestWorkflow } from '@/__tests__/mocks';
@@ -41,10 +44,11 @@ import {
 	CHAT_TOOL_NODE_TYPE,
 	RESPOND_TO_WEBHOOK_NODE_TYPE,
 	CHAT_HITL_TOOL_NODE_TYPE,
+	FORM_TRIGGER_NODE_TYPE,
 } from '../constants';
 import type { WorkflowObjectAccessors } from '../types';
 import type { useWorkflowDocumentStore } from '../stores/workflowDocument.store';
-import type { Mocked } from 'vitest';
+import type { MockInstance, Mocked } from 'vitest';
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
 
@@ -69,7 +73,6 @@ const { mockDocumentStore } = vi.hoisted(() => {
 		getPinnedDataLastUpdate: vi.fn(),
 		getPinnedDataLastRemovedAt: vi.fn(),
 		getWorkflowObjectAccessorSnapshot: vi.fn(),
-		hasNodeValidationIssues: false,
 		nodeValidationIssues: [],
 		serialize: vi.fn(),
 	} as Partial<Mocked<Writable<ReturnType<typeof useWorkflowDocumentStore>>>> as Mocked<
@@ -170,16 +173,6 @@ vi.mock('@/app/stores/workflowsList.store', () => {
 	};
 });
 
-vi.mock('@/app/stores/parameterOverrides.store', () => {
-	const storeState: Partial<ReturnType<typeof useAgentRequestStore>> & {} = {
-		agentRequests: {},
-		getAgentRequest: vi.fn(),
-	};
-	return {
-		useAgentRequestStore: vi.fn().mockReturnValue(storeState),
-	};
-});
-
 vi.mock('@/app/stores/pushConnection.store', () => ({
 	usePushConnectionStore: vi.fn().mockReturnValue({
 		isConnected: true,
@@ -189,10 +182,11 @@ vi.mock('@/app/stores/pushConnection.store', () => ({
 vi.mock('@n8n/stores/useRootStore', () => ({
 	useRootStore: vi.fn().mockReturnValue({
 		binaryDataMode: 'filesystem',
+		formTestUrl: 'http://localhost:5678/form-test',
 	}),
 }));
 
-vi.mock('@/app/composables/useTelemetry', () => ({
+vi.mock('@n8n/composables/useTelemetry', () => ({
 	useTelemetry: vi.fn().mockReturnValue({ track: vi.fn() }),
 }));
 
@@ -207,11 +201,19 @@ vi.mock('@/app/composables/useExternalHooks', () => ({
 	}),
 }));
 
-vi.mock('@/app/composables/useToast', () => ({
+vi.mock('@n8n/composables/useToast', () => ({
 	useToast: vi.fn().mockReturnValue({
 		clearAllStickyNotifications: vi.fn(),
 		showMessage: vi.fn(),
 		showError: vi.fn(),
+	}),
+}));
+
+vi.mock('@/app/composables/useMessage', () => ({
+	useMessage: vi.fn().mockReturnValue({
+		confirm: vi.fn().mockResolvedValue('confirm'),
+		alert: vi.fn(),
+		prompt: vi.fn(),
 	}),
 }));
 
@@ -234,9 +236,7 @@ vi.mock('@/app/composables/useWorkflowSaving', () => ({
 }));
 
 vi.mock('@/app/composables/useNodeHelpers', () => ({
-	useNodeHelpers: vi.fn().mockReturnValue({
-		updateNodesExecutionIssues: vi.fn(),
-	}),
+	useNodeHelpers: vi.fn().mockReturnValue({}),
 }));
 
 vi.mock('@n8n/chat/event-buses', () => ({
@@ -257,6 +257,15 @@ vi.mock('vue-router', async (importOriginal) => {
 			push: vi.fn(),
 		}),
 		useRoute: vi.fn(),
+	};
+});
+
+vi.mock('@/app/composables/useWorkflowId', async () => {
+	const { computed } = await import('vue');
+	const { useWorkflowsStore } = await import('@/app/stores/workflows.store');
+	return {
+		useWorkflowId: () => computed(() => useWorkflowsStore().workflowId),
+		useRouteWorkflowId: () => computed(() => useWorkflowsStore().workflowId),
 	};
 });
 
@@ -306,6 +315,21 @@ describe('useRunWorkflow({ router })', () => {
 		vi.clearAllMocks();
 	});
 
+	// Production reads run data from the execution-state store (keyed by document
+	// id), not the workflows store, so seed it to drive `activeExecutionRunData`.
+	function seedActiveRunData(runData: IRunData, executedNodes: INode[] = []) {
+		executionStateStore.setWorkflowExecutionData({
+			id: 'seeded-execution',
+			workflowData: { id: '123', nodes: executedNodes, connections: {} },
+			finished: true,
+			mode: 'manual',
+			status: 'success',
+			startedAt: new Date(),
+			createdAt: new Date(),
+			data: { resultData: { runData } },
+		} as unknown as IExecutionResponse);
+	}
+
 	describe('runWorkflowApi()', () => {
 		it('should throw an error if push connection is not active', async () => {
 			const { runWorkflowApi } = useRunWorkflow({ router });
@@ -338,15 +362,14 @@ describe('useRunWorkflow({ router })', () => {
 
 		it('should not prevent running a webhook-based workflow that has issues', async () => {
 			const { runWorkflowApi } = useRunWorkflow({ router });
-			mockDocumentStore.hasNodeValidationIssues = true;
+			// Nothing here gates a run on the document store's issue flags, so there is
+			// no flag to set. The point stands: a webhook-based run still resolves.
 			vi.mocked(workflowsStore).runWorkflow.mockResolvedValue({
 				executionId: '123',
 				waitingForWebhook: true,
 			});
 
 			await expect(runWorkflowApi({} as IStartRunData)).resolves.not.toThrow();
-
-			mockDocumentStore.hasNodeValidationIssues = false;
 		});
 
 		it('should handle workflow run failure', async () => {
@@ -390,14 +413,11 @@ describe('useRunWorkflow({ router })', () => {
 
 			vi.mocked(uiStore).activeActions = [''];
 			vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
-			mockDocumentStore.hasNodeValidationIssues = true;
 			mockDocumentStore.serialize.mockReturnValue({
 				id: 'workflowId',
 				nodes: [],
 			} as unknown as WorkflowData);
-			vi.mocked(workflowsStore).getWorkflowRunData = {
-				NodeName: [],
-			};
+			seedActiveRunData({ NodeName: [] });
 
 			const result = await runWorkflow({});
 			expect(result).toEqual(mockExecutionResponse);
@@ -409,17 +429,71 @@ describe('useRunWorkflow({ router })', () => {
 
 			vi.mocked(pushConnectionStore).isConnected = true;
 			vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
-			mockDocumentStore.hasNodeValidationIssues = false;
 			mockDocumentStore.serialize.mockReturnValue({
 				id: 'workflowId',
 				nodes: [],
 			} as unknown as WorkflowData);
-			vi.mocked(workflowsStore).getWorkflowRunData = {
-				NodeName: [],
-			};
+			seedActiveRunData({ NodeName: [] });
 
 			const result = await runWorkflow({});
 			expect(result).toEqual(mockExecutionResponse);
+		});
+
+		describe('form trigger popup', () => {
+			const formTrigger = createTestNode({
+				name: 'Form Trigger',
+				type: FORM_TRIGGER_NODE_TYPE,
+				parameters: { path: 'form-path' },
+			});
+			let windowOpenSpy: MockInstance;
+
+			beforeEach(() => {
+				windowOpenSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+				vi.mocked(pushConnectionStore).isConnected = true;
+				mockDocumentStore.serialize.mockReturnValue({
+					id: 'workflowId',
+					nodes: [formTrigger],
+				} as unknown as WorkflowData);
+			});
+
+			it('should open the popup at the form test URL the backend returns', async () => {
+				const formTestUrl = 'http://localhost:5678/webhook-test/v1-form/n8n-form';
+				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue({
+					waitingForWebhook: true,
+					formTestUrls: [formTestUrl],
+				});
+				const { runWorkflow } = useRunWorkflow({ router });
+
+				await runWorkflow({});
+
+				expect(windowOpenSpy).toHaveBeenCalledTimes(1);
+				expect(windowOpenSpy).toHaveBeenCalledWith(
+					formTestUrl,
+					expect.any(String),
+					expect.any(String),
+				);
+			});
+
+			it('should not open the popup if the backend returns no form test URLs', async () => {
+				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue({
+					waitingForWebhook: true,
+					formTestUrls: [],
+				});
+				const { runWorkflow } = useRunWorkflow({ router });
+
+				await runWorkflow({});
+
+				expect(windowOpenSpy).not.toHaveBeenCalled();
+			});
+
+			it('should not open the popup if the response contains an execution ID', async () => {
+				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue({ executionId: '123' });
+				const { runWorkflow } = useRunWorkflow({ router });
+
+				await runWorkflow({});
+
+				expect(windowOpenSpy).not.toHaveBeenCalled();
+			});
 		});
 
 		describe('save before execute behavior with N8N_WORKFLOWS_AUTOSAVE_DISABLED', () => {
@@ -433,7 +507,6 @@ describe('useRunWorkflow({ router })', () => {
 					id: 'workflowId',
 					nodes: [],
 				} as unknown as WorkflowData);
-				vi.mocked(workflowsStore).getWorkflowRunData = null;
 			});
 
 			it('should save before execute when autosave is enabled and state is dirty', async () => {
@@ -446,9 +519,29 @@ describe('useRunWorkflow({ router })', () => {
 				await runWorkflow({});
 
 				expect(workflowSaving.saveCurrentWorkflow).toHaveBeenCalledTimes(1);
+				expect(workflowsStore.runWorkflow).toHaveBeenCalledTimes(1);
 			});
 
-			it('should not save before execute when autosave is disabled and state is dirty', async () => {
+			it('should not run when the save before execute fails with autosave enabled', async () => {
+				vi.spyOn(settingsStore, 'isAutosaveEnabled', 'get').mockReturnValue(true);
+				vi.mocked(uiStore).stateIsDirty = true;
+				vi.mocked(workflowsStore).isWorkflowSaved = { '123': true };
+
+				const workflowSaving = useWorkflowSaving({ router });
+				vi.mocked(workflowSaving.saveCurrentWorkflow).mockResolvedValueOnce(false);
+				const { runWorkflow } = useRunWorkflow({ router });
+				const result = await runWorkflow({});
+
+				expect(workflowSaving.saveCurrentWorkflow).toHaveBeenCalledTimes(1);
+				expect(workflowsStore.runWorkflow).not.toHaveBeenCalled();
+				expect(result).toBeUndefined();
+			});
+
+			it('should prompt the user and save when they confirm if autosave is disabled and state is dirty (ADO-5328)', async () => {
+				const { useMessage } = await import('@/app/composables/useMessage');
+				const messageMock = vi.mocked(useMessage)();
+				vi.mocked(messageMock.confirm).mockResolvedValueOnce('confirm');
+
 				vi.spyOn(settingsStore, 'isAutosaveEnabled', 'get').mockReturnValue(false);
 				vi.mocked(uiStore).stateIsDirty = true;
 				vi.mocked(workflowsStore).isWorkflowSaved = { '123': true };
@@ -457,7 +550,27 @@ describe('useRunWorkflow({ router })', () => {
 				const { runWorkflow } = useRunWorkflow({ router });
 				await runWorkflow({});
 
+				expect(messageMock.confirm).toHaveBeenCalledTimes(1);
+				expect(workflowSaving.saveCurrentWorkflow).toHaveBeenCalledTimes(1);
+			});
+
+			it('should not run when the user cancels the save-before-run prompt (ADO-5328)', async () => {
+				const { useMessage } = await import('@/app/composables/useMessage');
+				const messageMock = vi.mocked(useMessage)();
+				vi.mocked(messageMock.confirm).mockResolvedValueOnce('cancel');
+
+				vi.spyOn(settingsStore, 'isAutosaveEnabled', 'get').mockReturnValue(false);
+				vi.mocked(uiStore).stateIsDirty = true;
+				vi.mocked(workflowsStore).isWorkflowSaved = { '123': true };
+
+				const workflowSaving = useWorkflowSaving({ router });
+				const { runWorkflow } = useRunWorkflow({ router });
+				const result = await runWorkflow({});
+
+				expect(messageMock.confirm).toHaveBeenCalledTimes(1);
 				expect(workflowSaving.saveCurrentWorkflow).not.toHaveBeenCalled();
+				expect(workflowsStore.runWorkflow).not.toHaveBeenCalled();
+				expect(result).toBeUndefined();
 			});
 
 			it('should save new workflow before execute even when autosave is disabled', async () => {
@@ -470,6 +583,21 @@ describe('useRunWorkflow({ router })', () => {
 				await runWorkflow({});
 
 				expect(workflowSaving.saveCurrentWorkflow).toHaveBeenCalledTimes(1);
+			});
+
+			it('should not run a new workflow when its first save fails', async () => {
+				vi.spyOn(settingsStore, 'isAutosaveEnabled', 'get').mockReturnValue(false);
+				vi.mocked(uiStore).stateIsDirty = false;
+				vi.mocked(workflowsStore).isWorkflowSaved = {};
+
+				const workflowSaving = useWorkflowSaving({ router });
+				vi.mocked(workflowSaving.saveCurrentWorkflow).mockResolvedValueOnce(false);
+				const { runWorkflow } = useRunWorkflow({ router });
+				const result = await runWorkflow({});
+
+				expect(workflowSaving.saveCurrentWorkflow).toHaveBeenCalledTimes(1);
+				expect(workflowsStore.runWorkflow).not.toHaveBeenCalled();
+				expect(result).toBeUndefined();
 			});
 		});
 
@@ -497,7 +625,6 @@ describe('useRunWorkflow({ router })', () => {
 			beforeEach(() => {
 				vi.mocked(pushConnectionStore).isConnected = true;
 				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue({ executionId: 'exec-1' });
-				vi.mocked(workflowsStore).getWorkflowRunData = null;
 				// The injected (globally-current) document store is workflow '123'. The
 				// scoped store passed per-call is a *different* workflow ('456'), so any
 				// fallback to global state surfaces as a wrong id in the assertions below.
@@ -554,6 +681,72 @@ describe('useRunWorkflow({ router })', () => {
 			});
 		});
 
+		describe('when the workflow uses a credential the user cannot use', () => {
+			const seedUnusableCredential = (currentUserCanUse: boolean) => {
+				mockDocumentStore.allNodes = [
+					createTestNode({
+						name: 'Gmail',
+						credentials: { gmailOAuth2: { id: 'cred-1', name: "Alice's Gmail" } },
+					}),
+				];
+				mockDocumentStore.usedCredentials = {
+					'cred-1': {
+						id: 'cred-1',
+						name: "Alice's Gmail",
+						credentialType: 'gmailOAuth2',
+						currentUserCanUse,
+						homeProject: { id: 'p1', name: 'Alice Chen <alice@n8n.io>', type: 'personal' },
+					},
+				} as unknown as typeof mockDocumentStore.usedCredentials;
+			};
+
+			beforeEach(() => {
+				mockDocumentStore.serialize.mockReturnValue({
+					id: 'workflowId',
+					nodes: [],
+				} as unknown as WorkflowData);
+			});
+
+			afterEach(() => {
+				mockDocumentStore.usedCredentials = {};
+			});
+
+			it('should not start the run and should show the reason', async () => {
+				seedUnusableCredential(false);
+				const toast = useToast();
+				const { runWorkflow } = useRunWorkflow({ router });
+
+				const result = await runWorkflow({});
+
+				expect(result).toBeUndefined();
+				expect(workflowsStore.runWorkflow).not.toHaveBeenCalled();
+				expect(toast.showMessage).toHaveBeenCalledWith({
+					type: 'warning',
+					title: useI18n().baseText('credentialSharing.blocked'),
+				});
+			});
+
+			it('should not start the run from runEntireWorkflow either', async () => {
+				seedUnusableCredential(false);
+				const { runEntireWorkflow } = useRunWorkflow({ router });
+
+				await runEntireWorkflow('main');
+
+				expect(workflowsStore.runWorkflow).not.toHaveBeenCalled();
+			});
+
+			it('should start the run when the user can use the credential', async () => {
+				seedUnusableCredential(true);
+				const mockExecutionResponse = { executionId: '123' };
+				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
+				const { runWorkflow } = useRunWorkflow({ router });
+
+				const result = await runWorkflow({});
+
+				expect(result).toEqual(mockExecutionResponse);
+			});
+		});
+
 		it('should prevent execution and show error when binary mode is "combined" with filesystem mode "default"', async () => {
 			const pinia = createTestingPinia({ stubActions: false });
 			setActivePinia(pinia);
@@ -605,13 +798,12 @@ describe('useRunWorkflow({ router })', () => {
 
 			vi.mocked(pushConnectionStore).isConnected = true;
 			vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
-			mockDocumentStore.hasNodeValidationIssues = false;
 			mockDocumentStore.serialize.mockReturnValue({
 				id: 'workflowId',
 				nodes: [],
 			} as unknown as WorkflowData);
 
-			vi.mocked(workflowsStore).getWorkflowRunData = {
+			seedActiveRunData({
 				[parentNodeName]: [
 					{
 						startTime: 1,
@@ -620,7 +812,7 @@ describe('useRunWorkflow({ router })', () => {
 						data: { main: [[{ json: { test: 'data' } }]] },
 					},
 				],
-			} as unknown as IRunData;
+			} as unknown as IRunData);
 
 			// ACT
 			await runWorkflow({ destinationNode: { nodeName: destinationNodeName, mode: 'inclusive' } });
@@ -653,7 +845,7 @@ describe('useRunWorkflow({ router })', () => {
 					? { main: [[{ node: parentName, type: NodeConnectionTypes.Main, index: 0 }]] }
 					: ({} as INodeConnections),
 			);
-			vi.mocked(workflowsStore).getWorkflowRunData = {
+			const runData = {
 				[parentName]: [
 					{
 						startTime: 1,
@@ -675,6 +867,18 @@ describe('useRunWorkflow({ router })', () => {
 					},
 				],
 			};
+			// Node dirtiness resolves run data through the execution-state store
+			// keyed by the document id, so seed the real store as well.
+			executionStateStore.setWorkflowExecutionData({
+				id: 'previous-execution',
+				workflowData: { id: '123', nodes: [], connections: {} },
+				finished: true,
+				mode: 'manual',
+				status: 'success',
+				startedAt: new Date(),
+				createdAt: new Date(),
+				data: { resultData: { runData } },
+			} as unknown as IExecutionResponse);
 			mockDocumentStore.serialize.mockReturnValue({
 				nodes: [],
 			} as unknown as WorkflowData);
@@ -833,12 +1037,16 @@ describe('useRunWorkflow({ router })', () => {
 
 			vi.mocked(pushConnectionStore).isConnected = true;
 			vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
-			mockDocumentStore.hasNodeValidationIssues = false;
 			mockDocumentStore.serialize.mockReturnValue(workflowData);
-			vi.mocked(workflowsStore).getWorkflowRunData = mockRunData;
+			seedActiveRunData(mockRunData);
 			vi.mocked(agentRequestStore).getAgentRequest.mockReturnValue(agentRequest);
 
-			const setWorkflowExecutionData = vi.spyOn(executionStateStore, 'setWorkflowExecutionData');
+			// `createTestingPinia({ stubActions: false })` eagerly spies every action,
+			// so the `seedActiveRunData` call above is already recorded. Clear it so the
+			// assertions below count only the calls made by `runWorkflow`.
+			const setWorkflowExecutionData = vi
+				.spyOn(executionStateStore, 'setWorkflowExecutionData')
+				.mockClear();
 
 			// ACT
 			const result = await runWorkflow({
@@ -872,6 +1080,57 @@ describe('useRunWorkflow({ router })', () => {
 			expect(dataCaptor.value).toMatchObject({ data: { resultData: { runData: mockRunData } } });
 		});
 
+		describe('run data of replaced nodes', () => {
+			async function runPartialExecutionWith({
+				executedNodeId,
+				currentNodeId,
+			}: {
+				executedNodeId: string;
+				currentNodeId: string;
+			}) {
+				const { runWorkflow } = useRunWorkflow({ router });
+				const runData = { 'Test node': [] };
+
+				vi.mocked(mockDocumentStore.getNodeByName).mockImplementation((name: string) =>
+					name === 'Test node' ? createTestNode({ id: currentNodeId, name: 'Test node' }) : null,
+				);
+				vi.mocked(pushConnectionStore).isConnected = true;
+				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue({ executionId: '123' });
+
+				mockDocumentStore.serialize.mockReturnValue({
+					id: 'workflowId',
+					nodes: [createTestNode({ id: currentNodeId, name: 'Test node' })],
+					connections: {},
+				});
+
+				seedActiveRunData(runData, [createTestNode({ id: executedNodeId, name: 'Test node' })]);
+
+				await runWorkflow({
+					destinationNode: { nodeName: 'Test node', mode: 'inclusive' },
+				});
+
+				return vi.mocked(workflowsStore).runWorkflow.mock.calls.at(-1)?.[0];
+			}
+
+			it('drops the entry when the name now belongs to a different node', async () => {
+				const startRunData = await runPartialExecutionWith({
+					executedNodeId: 'executed-id',
+					currentNodeId: 'added-after-the-run',
+				});
+
+				expect(startRunData?.runData).toEqual({});
+			});
+
+			it('keeps the entry for the node that recorded it', async () => {
+				const startRunData = await runPartialExecutionWith({
+					executedNodeId: 'same-id',
+					currentNodeId: 'same-id',
+				});
+
+				expect(startRunData?.runData).toEqual({ 'Test node': [] });
+			});
+		});
+
 		it('retains the original run data', async () => {
 			// ARRANGE
 			const mockExecutionResponse = { executionId: '123' };
@@ -881,13 +1140,17 @@ describe('useRunWorkflow({ router })', () => {
 
 			vi.mocked(pushConnectionStore).isConnected = true;
 			vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
-			mockDocumentStore.hasNodeValidationIssues = false;
 			mockDocumentStore.serialize.mockReturnValue(
 				mock<WorkflowData>({ id: 'workflowId', nodes: [] }),
 			);
-			vi.mocked(workflowsStore).getWorkflowRunData = mockRunData;
+			seedActiveRunData(mockRunData);
 
-			const setWorkflowExecutionData = vi.spyOn(executionStateStore, 'setWorkflowExecutionData');
+			// `createTestingPinia({ stubActions: false })` eagerly spies every action,
+			// so the `seedActiveRunData` call above is already recorded. Clear it so the
+			// assertions below count only the calls made by `runWorkflow`.
+			const setWorkflowExecutionData = vi
+				.spyOn(executionStateStore, 'setWorkflowExecutionData')
+				.mockClear();
 
 			// ACT
 			const result = await runWorkflow({
@@ -910,11 +1173,10 @@ describe('useRunWorkflow({ router })', () => {
 
 			vi.mocked(pushConnectionStore).isConnected = true;
 			vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
-			mockDocumentStore.hasNodeValidationIssues = false;
 			mockDocumentStore.serialize.mockReturnValue(
 				mock<WorkflowData>({ id: 'workflowId', nodes: [] }),
 			);
-			vi.mocked(workflowsStore).getWorkflowRunData = mockRunData;
+			seedActiveRunData(mockRunData);
 
 			// ACT
 			const result = await runWorkflow({});
@@ -965,7 +1227,6 @@ describe('useRunWorkflow({ router })', () => {
 			beforeEach(() => {
 				vi.mocked(pushConnectionStore).isConnected = true;
 				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue({ executionId: 'exec-123' });
-				mockDocumentStore.hasNodeValidationIssues = false;
 				mockDocumentStore.checkIfNodeHasChatParent.mockReturnValue(false);
 				mockDocumentStore.checkIfToolNodeHasChatParent.mockReturnValue(false);
 			});
@@ -1025,10 +1286,7 @@ describe('useRunWorkflow({ router })', () => {
 			beforeEach(() => {
 				vi.mocked(pushConnectionStore).isConnected = true;
 				vi.mocked(workflowsStore).runWorkflow.mockResolvedValue(mockExecutionResponse);
-				mockDocumentStore.hasNodeValidationIssues = false;
-				vi.mocked(workflowsStore).getWorkflowRunData = {
-					NodeName: [],
-				};
+				seedActiveRunData({ NodeName: [] });
 			});
 
 			it("should show a warning if there are no chat response nodes and chat trigger's response mode is `responseNodes`", async () => {
@@ -1370,6 +1628,31 @@ describe('useRunWorkflow({ router })', () => {
 	});
 
 	describe('stopCurrentExecution()', () => {
+		it('waits for the pending execution id instead of dropping the stop request', async () => {
+			const runWorkflowComposable = useRunWorkflow({ router });
+			const { useExecutionsStore } = await import(
+				'@/features/execution/executions/executions.store'
+			);
+			const executionsStore = useExecutionsStore();
+			const stopSpy = vi
+				.spyOn(executionsStore, 'stopCurrentExecution')
+				.mockResolvedValue({ mode: 'manual', status: 'canceled' } as IExecutionsStopData);
+			vi.spyOn(workflowsStore, 'getExecution').mockResolvedValue({
+				status: 'canceled',
+			} as IExecutionResponse);
+
+			// Run accepted, backend id not yet known.
+			executionStateStore.setActiveExecutionId(null);
+
+			const stopPromise = runWorkflowComposable.stopCurrentExecution();
+			expect(stopSpy).not.toHaveBeenCalled();
+
+			executionStateStore.setActiveExecutionId('exec-late');
+			await stopPromise;
+
+			expect(stopSpy).toHaveBeenCalledWith('exec-late');
+		});
+
 		it('stamps id and clears activeExecutionId before setWorkflowExecutionData when execution finished before stop', async () => {
 			const runWorkflowComposable = useRunWorkflow({ router });
 			const finishedExecution: IExecutionResponse = {

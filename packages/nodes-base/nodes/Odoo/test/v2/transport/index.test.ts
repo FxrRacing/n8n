@@ -1,12 +1,14 @@
-import type { MockProxy } from 'jest-mock-extended';
-import { mock } from 'jest-mock-extended';
+import type { MockProxy } from 'vitest-mock-extended';
+import { mock } from 'vitest-mock-extended';
 import type { IExecuteFunctions } from 'n8n-workflow';
+import { requestUrl } from 'n8n-workflow';
 
 import { bodyToRpcArgs, odooApiRequest } from '../../../v2/transport';
+import type * as _importType0 from 'n8n-workflow';
 
-jest.mock('n8n-workflow', () => ({
-	...jest.requireActual('n8n-workflow'),
-	randomInt: jest.fn(() => 1),
+vi.mock('n8n-workflow', async () => ({
+	...(await vi.importActual<typeof _importType0>('n8n-workflow')),
+	randomInt: vi.fn(() => 1),
 }));
 
 // ─── bodyToRpcArgs ────────────────────────────────────────────────────────────
@@ -105,7 +107,7 @@ describe('odooApiRequest', () => {
 		ctx.getNode.mockReturnValue({ name: 'Odoo', type: 'n8n-nodes-base.odoo' } as any);
 	});
 
-	afterEach(() => jest.clearAllMocks());
+	afterEach(() => vi.clearAllMocks());
 
 	describe('API key auth (callJson2)', () => {
 		beforeEach(() => {
@@ -116,7 +118,7 @@ describe('odooApiRequest', () => {
 				db: '',
 			});
 			ctx.helpers = {
-				httpRequestWithAuthentication: jest.fn().mockResolvedValue([{ id: 1, name: 'Test' }]),
+				httpRequestWithAuthentication: vi.fn().mockResolvedValue([{ id: 1, name: 'Test' }]),
 			} as any;
 		});
 
@@ -130,7 +132,7 @@ describe('odooApiRequest', () => {
 				'odooApiKeyApi',
 				expect.objectContaining({
 					method: 'POST',
-					url: 'https://myorg.odoo.com/json/2/res.partner/search_read',
+					url: requestUrl`https://myorg.odoo.com/json/2/res.partner/search_read`,
 					body: { domain: [], fields: ['id'] },
 					json: true,
 				}),
@@ -146,7 +148,7 @@ describe('odooApiRequest', () => {
 			expect(ctx.helpers.httpRequestWithAuthentication).toHaveBeenCalledWith(
 				'odooApiKeyApi',
 				expect.objectContaining({
-					url: 'https://myorg.odoo.com/json/2/res.partner/create',
+					url: requestUrl`https://myorg.odoo.com/json/2/res.partner/create`,
 					body: { vals_list: [{ name: 'Jane Doe', email: 'jane@example.com' }] },
 				}),
 			);
@@ -157,8 +159,42 @@ describe('odooApiRequest', () => {
 			await odooApiRequest.call(ctx, 'res.partner', 'read', { ids: [1], fields: [] });
 			expect(ctx.helpers.httpRequestWithAuthentication).toHaveBeenCalledWith(
 				'odooApiKeyApi',
-				expect.objectContaining({ url: 'https://myorg.odoo.com/json/2/res.partner/read' }),
+				expect.objectContaining({
+					url: requestUrl`https://myorg.odoo.com/json/2/res.partner/read`,
+				}),
 			);
+		});
+
+		it('keeps user info in the site URL', async () => {
+			ctx.getCredentials.mockResolvedValue({ url: 'https://u:p@odoo.example.com', db: 'erp' });
+			await odooApiRequest.call(ctx, 'res.partner', 'read', { ids: [1], fields: [] });
+			expect(ctx.helpers.httpRequestWithAuthentication).toHaveBeenCalledWith(
+				'odooApiKeyApi',
+				expect.objectContaining({
+					url: expect.objectContaining({
+						value: 'https://u:p@odoo.example.com/json/2/res.partner/read',
+					}),
+				}),
+			);
+		});
+
+		it('encodes the model name as one path segment', async () => {
+			await odooApiRequest.call(ctx, 'res.partner/res.users', 'read', { ids: [1] });
+			expect(ctx.helpers.httpRequestWithAuthentication).toHaveBeenCalledWith(
+				'odooApiKeyApi',
+				expect.objectContaining({
+					url: expect.objectContaining({
+						value: 'https://myorg.odoo.com/json/2/res.partner%2Fres.users/read',
+					}),
+				}),
+			);
+		});
+
+		it('should reject a model name with a dot segment', async () => {
+			await expect(
+				odooApiRequest.call(ctx, 'res.partner/../res.users', 'read', { ids: [1] }),
+			).rejects.toThrow('Invalid identifier');
+			expect(ctx.helpers.httpRequestWithAuthentication).not.toHaveBeenCalled();
 		});
 
 		it('includes X-Odoo-Database header when db is set', async () => {
@@ -188,7 +224,7 @@ describe('odooApiRequest', () => {
 
 		it('throws NodeApiError on HTTP failure', async () => {
 			ctx.helpers = {
-				httpRequestWithAuthentication: jest.fn().mockRejectedValue(new Error('Network error')),
+				httpRequestWithAuthentication: vi.fn().mockRejectedValue(new Error('Network error')),
 			} as any;
 			await expect(
 				odooApiRequest.call(ctx, 'res.partner', 'search_read', {}),
@@ -206,7 +242,7 @@ describe('odooApiRequest', () => {
 				db: 'mydb',
 			});
 			ctx.helpers = {
-				httpRequest: jest
+				httpRequest: vi
 					.fn()
 					.mockResolvedValueOnce({ result: 1 }) // getRpcUserID login
 					.mockResolvedValueOnce({ result: [{ id: 1 }] }), // execute
@@ -225,7 +261,7 @@ describe('odooApiRequest', () => {
 			expect(ctx.helpers.httpRequest).toHaveBeenNthCalledWith(
 				1,
 				expect.objectContaining({
-					url: 'https://myorg.odoo.com/jsonrpc',
+					url: requestUrl`https://myorg.odoo.com/jsonrpc`,
 					body: expect.objectContaining({
 						params: expect.objectContaining({ service: 'common', method: 'login' }),
 					}),
@@ -235,7 +271,7 @@ describe('odooApiRequest', () => {
 			expect(ctx.helpers.httpRequest).toHaveBeenNthCalledWith(
 				2,
 				expect.objectContaining({
-					url: 'https://myorg.odoo.com/jsonrpc',
+					url: requestUrl`https://myorg.odoo.com/jsonrpc`,
 					body: expect.objectContaining({
 						params: expect.objectContaining({ service: 'object', method: 'execute' }),
 					}),
@@ -246,7 +282,7 @@ describe('odooApiRequest', () => {
 
 		it('throws when login returns an error', async () => {
 			ctx.helpers = {
-				httpRequest: jest.fn().mockResolvedValue({
+				httpRequest: vi.fn().mockResolvedValue({
 					error: { data: { message: 'Invalid credentials' } },
 				}),
 			} as any;
@@ -257,7 +293,7 @@ describe('odooApiRequest', () => {
 
 		it('throws when execute response contains an error', async () => {
 			ctx.helpers = {
-				httpRequest: jest
+				httpRequest: vi
 					.fn()
 					.mockResolvedValueOnce({ result: 1 })
 					.mockResolvedValueOnce({ error: { data: { message: 'Access denied' } } }),

@@ -11,33 +11,34 @@ import {
 	pipedriveApiRequestAllItemsCursor,
 	pipedriveGetCustomProperties,
 } from '../../v2/transport';
+import type { Mock } from 'vitest';
 
-jest.mock('../../v2/transport', () => ({
-	pipedriveApiRequest: { call: jest.fn() },
-	pipedriveApiRequestAllItemsCursor: { call: jest.fn() },
-	pipedriveApiRequestAllItemsOffset: { call: jest.fn() },
-	pipedriveGetCustomProperties: { call: jest.fn() },
+vi.mock('../../v2/transport', () => ({
+	pipedriveApiRequest: { call: vi.fn() },
+	pipedriveApiRequestAllItemsCursor: { call: vi.fn() },
+	pipedriveApiRequestAllItemsOffset: { call: vi.fn() },
+	pipedriveGetCustomProperties: { call: vi.fn() },
 }));
 
-const mockApiRequest = pipedriveApiRequest as unknown as { call: jest.Mock };
+const mockApiRequest = pipedriveApiRequest as unknown as { call: Mock };
 const mockApiRequestAllItemsCursor = pipedriveApiRequestAllItemsCursor as unknown as {
-	call: jest.Mock;
+	call: Mock;
 };
-const mockGetCustomProperties = pipedriveGetCustomProperties as unknown as { call: jest.Mock };
+const mockGetCustomProperties = pipedriveGetCustomProperties as unknown as { call: Mock };
 
 function buildContext(params: Record<string, unknown>): IExecuteFunctions {
 	return {
-		getInputData: jest.fn(() => [{ json: {} }]),
-		getNodeParameter: jest.fn((name: string, _i?: number, defaultValue?: unknown) => {
+		getInputData: vi.fn(() => [{ json: {} }]),
+		getNodeParameter: vi.fn((name: string, _i?: number, defaultValue?: unknown) => {
 			if (Object.prototype.hasOwnProperty.call(params, name)) return params[name];
 			return defaultValue;
 		}),
-		continueOnFail: jest.fn(() => false),
+		continueOnFail: vi.fn(() => false),
 		helpers: {
-			returnJsonArray: jest.fn((data: unknown) => (Array.isArray(data) ? data : [data])),
-			constructExecutionMetaData: jest.fn((items: unknown) => items),
+			returnJsonArray: vi.fn((data: unknown) => (Array.isArray(data) ? data : [data])),
+			constructExecutionMetaData: vi.fn((items: unknown) => items),
 		},
-		getNode: jest.fn(() => ({})),
+		getNode: vi.fn(() => ({})),
 	} as unknown as IExecuteFunctions;
 }
 
@@ -66,7 +67,7 @@ describe('Pipedrive v2 maps user_id parameter to owner_id on outgoing requests',
 			IDataObject,
 		];
 		expect(method).toBe('POST');
-		expect(endpoint).toBe('/deals');
+		expect(String(endpoint)).toBe('/deals');
 		expect(body.owner_id).toBe(25455458);
 		expect(body).not.toHaveProperty('user_id');
 	});
@@ -87,7 +88,7 @@ describe('Pipedrive v2 maps user_id parameter to owner_id on outgoing requests',
 			IDataObject,
 		];
 		expect(method).toBe('PATCH');
-		expect(endpoint).toBe('/deals/10');
+		expect(String(endpoint)).toBe('/deals/10');
 		expect(body.owner_id).toBe(25455458);
 		expect(body).not.toHaveProperty('user_id');
 	});
@@ -110,7 +111,7 @@ describe('Pipedrive v2 maps user_id parameter to owner_id on outgoing requests',
 			IDataObject,
 		];
 		expect(method).toBe('GET');
-		expect(endpoint).toBe('/deals');
+		expect(String(endpoint)).toBe('/deals');
 		expect(qs.owner_id).toBe(25455458);
 		expect(qs).not.toHaveProperty('user_id');
 	});
@@ -133,7 +134,7 @@ describe('Pipedrive v2 maps user_id parameter to owner_id on outgoing requests',
 			IDataObject,
 		];
 		expect(method).toBe('POST');
-		expect(endpoint).toBe('/activities');
+		expect(String(endpoint)).toBe('/activities');
 		expect(body.owner_id).toBe(25455458);
 		expect(body).not.toHaveProperty('user_id');
 	});
@@ -154,7 +155,7 @@ describe('Pipedrive v2 maps user_id parameter to owner_id on outgoing requests',
 			IDataObject,
 		];
 		expect(method).toBe('PATCH');
-		expect(endpoint).toBe('/activities/10');
+		expect(String(endpoint)).toBe('/activities/10');
 		expect(body.owner_id).toBe(25455458);
 		expect(body).not.toHaveProperty('user_id');
 	});
@@ -177,7 +178,7 @@ describe('Pipedrive v2 maps user_id parameter to owner_id on outgoing requests',
 			IDataObject,
 		];
 		expect(method).toBe('GET');
-		expect(endpoint).toBe('/activities');
+		expect(String(endpoint)).toBe('/activities');
 		expect(qs.owner_id).toBe(25455458);
 		expect(qs).not.toHaveProperty('user_id');
 	});

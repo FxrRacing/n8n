@@ -12,12 +12,12 @@ import { Container } from '@n8n/di';
 @BackendModule({ name: 'fxr-sso', instanceTypes: ['main'] })
 export class FxrSsoModule implements ModuleInterface {
 	async init() {
-		await import('./fxr-sso.controller');
-		await import('./fxr-sso-settings.controller');
+		await import('./fxr-sso.controller.js');
+		await import('./fxr-sso-settings.controller.js');
 	}
 
 	async settings() {
-		const { FxrSsoSettingsService } = await import('./fxr-sso-settings.service');
+		const { FxrSsoSettingsService } = await import('./fxr-sso-settings.service.js');
 		const settings = Container.get(FxrSsoSettingsService);
 		const effective = await settings.getEffective();
 		return {

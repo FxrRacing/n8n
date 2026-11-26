@@ -2,71 +2,102 @@
 
 import type { PushMessage, PushType } from '@n8n/api-types';
 import { Logger, ModuleRegistry } from '@n8n/backend-common';
-import { ExecutionsConfig, GlobalConfig, SsrfProtectionConfig } from '@n8n/config';
+import { SsrfProtectionService } from '@n8n/backend-network';
+import {
+	CodeExecutionBackend,
+	EventService,
+	ExecutionLedger,
+	UrlService,
+	RuntimeCredentialProxyService,
+	toEndedFactsFromRun,
+	WorkflowPublishedDataService,
+	toCodeTaskRequest,
+	WorkflowVersionedSettingsService,
+} from '@n8n/backend-services';
+import { ExecutionsConfig, GlobalConfig, SsrfProtectionConfig, WorkflowsConfig } from '@n8n/config';
 import { Time } from '@n8n/constants';
 import { ExecutionRepository, WorkflowRepository } from '@n8n/db';
 import { Container } from '@n8n/di';
-import type { ServiceIdentifier } from '@n8n/di';
-import { ExternalSecretsProxy, WorkflowExecute } from 'n8n-core';
+import type { JSONSchema7 } from 'json-schema';
 import {
-	UnexpectedError,
-	Workflow,
-	createRunExecutionData,
-	mergeRunsPerBranch,
-} from 'n8n-workflow';
+	type ExecutionLifecycleHooks,
+	ExternalSecretsProxy,
+	StorageConfig,
+	WorkflowExecute,
+} from 'n8n-core';
 import type {
 	AiEvent,
+	ExecuteAgentData,
+	ExecuteAgentInvocationContext,
+	ExecuteAgentSource,
+	ExecuteAgentWorkflowContext,
+	ExecuteWorkflowData,
+	ExecuteWorkflowOptions,
+	ExecutionBlockedReason,
+	ExecutionError,
+	ExecutionStatus,
 	IDataObject,
 	IExecuteData,
+	IWorkflowExecutionTelemetryMetadata,
 	IExecuteWorkflowInfo,
 	INode,
 	INodeExecutionData,
 	INodeParameters,
-	IWorkflowBase,
-	IWorkflowExecuteAdditionalData,
-	IWorkflowSettings,
-	WorkflowExecuteMode,
-	ExecutionStatus,
-	ExecutionError,
-	IExecuteFunctions,
-	ITaskDataConnections,
-	ExecuteWorkflowOptions,
-	IWorkflowExecutionDataProcess,
-	EnvProviderState,
-	ExecuteWorkflowData,
-	ExecuteAgentData,
-	RelatedExecution,
 	IRun,
 	IRunExecutionData,
+	IWorkflowBase,
+	IWorkflowExecuteAdditionalData,
+	IWorkflowExecutionDataProcess,
+	IWorkflowSettings,
+	RelatedExecution,
+	WorkflowExecuteMode,
 } from 'n8n-workflow';
+import {
+	ManualExecutionCancelledError,
+	Workflow,
+	createRunExecutionData,
+	mergeRunsPerBranch,
+	collectSubWorkflowOutput,
+	getSubWorkflowOutputPolicy,
+	attachDynamicCredentialsUsage,
+	summarizeDynamicCredentialsUsage,
+	attachSubWorkflowRedaction,
+	summarizeSubWorkflowRedaction,
+} from 'n8n-workflow';
+import { OperationalError, UnexpectedError, UserError } from '@n8n/errors';
+
+import type { PrepareWorkflowAgentForEval } from './modules/agents/evaluation/agent-evaluation.contracts';
+import type { WorkflowAgentRunOptions } from './modules/agents/agent-workflow-execution.service';
+import { createWorkflowAgentStreamObserver } from './modules/agents/workflow-agent-stream';
 
 import { ActiveExecutions } from '@/active-executions';
+import { BinaryDataAccessService } from '@/binary-data/binary-data-access.service';
 import { CredentialsHelper } from '@/credentials-helper';
-import { EventService } from '@/events/event.service';
+import { PreExecuteBlockedError } from '@/errors/pre-execute-blocked.error';
 import type { AiEventPayload } from '@/events/maps/ai.event-map';
 import { getLifecycleHooksForSubExecutions } from '@/execution-lifecycle/execution-lifecycle-hooks';
+import { ExecutionPersistence } from '@/executions/execution-persistence';
 import { isManualOrChatExecution } from '@/executions/execution.utils';
 import { FailedRunFactory } from '@/executions/failed-run-factory';
 import {
 	CredentialsPermissionChecker,
 	SubworkflowPolicyChecker,
+	WorkflowPreExecute,
 } from '@/executions/pre-execution-checks';
 import type { UpdateExecutionPayload } from '@/interfaces';
 import { NodeTypes } from '@/node-types';
 import { Push } from '@/push';
-import { SsrfProtectionService } from '@/services/ssrf/ssrf-protection.service';
-import { UrlService } from '@/services/url.service';
-import { TaskRequester } from '@/task-runners/task-managers/task-requester';
 import { findSubworkflowStart } from '@/utils';
-import { objectToError } from '@/utils/object-to-error';
+import { buildSubWorkflowError } from '@/utils/sub-workflow-error';
 import * as WorkflowHelpers from '@/workflow-helpers';
-
-import { RuntimeCredentialProxyService } from './services/runtime-credential-proxy.service';
+import { DeprecatedNodesValidationService } from '@/workflows/deprecated-nodes-validation.service';
+import { getWorkflowProjectDetailsSafe } from '@/workflows/utils';
 
 export function getRunData(
 	workflowData: IWorkflowBase,
 	inputData?: INodeExecutionData[],
 	parentExecution?: RelatedExecution,
+	binaryDataAccess?: string[],
 ): IWorkflowExecutionDataProcess {
 	const mode = 'integrated';
 
@@ -91,6 +122,7 @@ export function getRunData(
 	});
 
 	const runExecutionData = createRunExecutionData({
+		binaryDataAccess,
 		executionData: {
 			nodeExecutionStack,
 		},
@@ -98,6 +130,7 @@ export function getRunData(
 	});
 
 	return {
+		binaryDataAccess,
 		executionMode: mode,
 		executionData: runExecutionData,
 		workflowData,
@@ -140,9 +173,15 @@ async function fetchWorkflowData(
 	} else {
 		const workflowData = workflowInfo.code;
 		if (workflowData) {
-			if (!workflowData.id) {
-				workflowData.id = parentWorkflowId;
-			}
+			// The save-time check does not see inline JSON, so it runs here.
+			Container.get(DeprecatedNodesValidationService).validateOnCreate(
+				workflowData.nodes ?? [],
+				parentWorkflowId,
+			);
+			WorkflowHelpers.validateWorkflowStructure(workflowData);
+			// An inline sub-workflow is part of the parent that embeds it, not a
+			// workflow of its own, so it runs under the parent workflow's id.
+			workflowData.id = parentWorkflowId;
 			workflowData.settings ??= parentWorkflowSettings;
 		}
 		return workflowData;
@@ -177,6 +216,35 @@ export async function getPublishedWorkflowData(
 	parentWorkflowId: string,
 	parentWorkflowSettings?: IWorkflowSettings,
 ): Promise<IWorkflowBase> {
+	// For a workflow loaded from the database, read the published version from the
+	// workflow_published_version table when the publication service is enabled.
+	// (Inline code is returned as-is below.)
+	//
+	// TODO(CAT-3202): clean up the workflow data fetching
+	if (
+		workflowInfo.id !== undefined &&
+		Container.get(WorkflowsConfig).useWorkflowPublicationService
+	) {
+		const publishedData = await Container.get(
+			WorkflowPublishedDataService,
+		).getPublishedWorkflowData(workflowInfo.id);
+		if (publishedData === null) {
+			throw new OperationalError('Workflow is not active and cannot be executed.', {
+				extra: { workflowId: workflowInfo.id, parentWorkflowId },
+			});
+		}
+		return {
+			...publishedData.workflow,
+			versionId: publishedData.publishedVersion.versionId,
+			nodes: publishedData.publishedVersion.nodes,
+			connections: publishedData.publishedVersion.connections,
+			settings: Container.get(WorkflowVersionedSettingsService).forPublishedRun(
+				publishedData.workflow.settings,
+				publishedData.publishedVersion,
+			),
+		};
+	}
+
 	const workflowData = await fetchWorkflowData(
 		workflowInfo,
 		parentWorkflowId,
@@ -192,13 +260,18 @@ export async function getPublishedWorkflowData(
 	if (workflowData && 'activeVersion' in workflowData && workflowData.activeVersion) {
 		return {
 			...workflowData,
+			versionId: workflowData.activeVersion.versionId,
 			nodes: workflowData.activeVersion.nodes,
 			connections: workflowData.activeVersion.connections,
+			settings: Container.get(WorkflowVersionedSettingsService).forPublishedRun(
+				workflowData.settings,
+				workflowData.activeVersion,
+			),
 		};
 	}
 
-	throw new UnexpectedError('Workflow is not active and cannot be executed.', {
-		extra: { workflowId: workflowInfo.id },
+	throw new OperationalError('Workflow is not active and cannot be executed.', {
+		extra: { workflowId: workflowInfo.id, parentWorkflowId },
 	});
 }
 
@@ -264,8 +337,12 @@ export async function executeWorkflow(
 	const activeExecutions = Container.get(ActiveExecutions);
 
 	// Use draft sub-workflows for manual/chat executions to enable
-	// iterating on sub-workflows without requiring them to be published
-	const useDraftVersion = isManualOrChatExecution(options.executionMode);
+	// iterating on sub-workflows without requiring them to be published.
+	// A nested sub-workflow's own parent runs as 'integrated', so read the mode
+	// of the root execution: every level below a manual run uses drafts.
+	const useDraftVersion = isManualOrChatExecution(
+		additionalData.rootExecutionMode ?? options.executionMode,
+	);
 
 	const workflowData =
 		options.loadedWorkflowData ??
@@ -282,17 +359,50 @@ export async function executeWorkflow(
 				));
 
 	const runData =
-		options.loadedRunData ?? getRunData(workflowData, options.inputData, options.parentExecution);
+		options.loadedRunData ??
+		getRunData(workflowData, options.inputData, options.parentExecution, options.binaryDataAccess);
 
-	const executionId = await activeExecutions.add(runData);
+	if (runData.executionData) {
+		runData.executionData.subWorkflowOutput ??= getSubWorkflowOutputPolicy(
+			workflowData.nodes,
+			options.returnLastRunOnly ?? false,
+		);
+		runData.executionData.rootExecutionMode ??=
+			additionalData.rootExecutionMode ?? options.executionMode;
+	}
+
+	try {
+		await Container.get(WorkflowPreExecute).run(
+			workflowData,
+			runData.executionMode,
+			runData.source,
+		);
+	} catch (error) {
+		throw PreExecuteBlockedError.unwrap(error);
+	}
+
+	const { OwnershipService } = await import('@/services/ownership.service.js');
+	const { projectId, projectName } = await getWorkflowProjectDetailsSafe(
+		Container.get(OwnershipService),
+		workflowData.id,
+	);
+
+	const executionId = await activeExecutions.add({ ...runData, projectId });
 
 	Container.get(EventService).emit('workflow-executed', {
 		user: additionalData.userId ? { id: additionalData.userId } : undefined,
 		workflowId: workflowData.id,
 		workflowName: workflowData.name,
 		executionId,
+		projectId,
+		projectName,
 		source: 'integrated',
 	});
+
+	// A sub-workflow loaded from inline JSON / file / URL (source other than a
+	// stored database workflow) carries no project of its own. Its credentials
+	// must be evaluated against the triggering user, not the parent's project.
+	const isInlineSubworkflow = workflowInfo.code !== undefined && workflowInfo.id === undefined;
 
 	const executionPromise = startExecution(
 		additionalData,
@@ -300,74 +410,175 @@ export async function executeWorkflow(
 		executionId,
 		runData,
 		workflowData,
+		isInlineSubworkflow,
 	);
 
 	if (options.doNotWaitToFinish) {
+		// Nothing awaits a detached sub-workflow. `startExecution` stores its failure, or logs
+		// an error when it cannot.
+		executionPromise.catch((error: Error) => {
+			Container.get(Logger).debug('Detached sub-workflow execution failed', {
+				executionId,
+				workflowId: workflowData.id,
+				error,
+			});
+		});
 		return { executionId, data: [null] };
 	}
 
 	return await executionPromise;
 }
 
+/** Workflows that already use agent nodes still load, so fail clearly when the module is off. */
+function assertAgentsModuleActive() {
+	if (!Container.get(ModuleRegistry).isActive('agents')) {
+		throw new UserError(
+			'Agents are disabled on this instance. Ask an instance admin to enable the agents module.',
+		);
+	}
+}
+
 /**
- * Executes an agent with the given ID and message.
+ * Executes an agent — a saved one by ID, or an inline definition embedded in
+ * the calling node's parameters.
  */
 export async function executeAgent(
-	agentId: string,
+	source: ExecuteAgentSource,
 	message: string,
 	executionId: string,
 	threadId: string,
 	additionalData: IWorkflowExecuteAdditionalData,
 	executionMode: WorkflowExecuteMode,
+	outputSchema?: JSONSchema7,
+	workflowContext?: ExecuteAgentWorkflowContext,
+	invocationContext?: ExecuteAgentInvocationContext,
+	prepareForEval?: PrepareWorkflowAgentForEval,
 ): Promise<ExecuteAgentData> {
-	let userId = additionalData.userId;
+	assertAgentsModuleActive();
+
 	const telemetryUserId = additionalData.userId;
 	let projectId = additionalData.projectId;
 
 	// Trigger-fired and webhook executions build `additionalData` without a
-	// `userId` (see `getBase` callers in `active-workflow-manager`,
-	// `webhooks/*`, `scaling/job-processor`). Resolve the workflow's owning
-	// project to derive both `userId` and `projectId` so the agent runs under
-	// the workflow owner's identity, mirroring the projectId backfill below.
-	if ((!userId || !projectId) && additionalData.workflowId) {
-		const { OwnershipService } = await import('@/services/ownership.service');
+	// `projectId` (see `getBase` callers in `active-workflow-manager`,
+	// `webhooks/*`, `scaling/job-processor`). Resolve it from the workflow's
+	// owning project so the agent runs under the correct project scope.
+	if (!projectId && additionalData.workflowId) {
+		const { OwnershipService } = await import('@/services/ownership.service.js');
 		const ownershipService = Container.get(OwnershipService);
 		const project = await ownershipService.getWorkflowProjectCached(additionalData.workflowId);
-		projectId = projectId ?? project.id;
-		if (!userId) {
-			const owner = await ownershipService.getPersonalProjectOwnerCached(project.id);
-			userId = owner?.id;
-		}
+		projectId = project.id;
 	}
 
-	if (!userId) {
-		throw new UnexpectedError('Cannot execute agent without a userId in additional data');
-	}
 	if (!projectId) {
 		throw new UnexpectedError(
 			'Cannot execute agent without a projectId or workflowId in additional data',
 		);
 	}
 
-	const { AgentsService } = await import('@/modules/agents/agents.service');
-	const agentsService = Container.get(AgentsService);
+	const { AgentWorkflowExecutionService } = await import(
+		'@/modules/agents/agent-workflow-execution.service.js'
+	);
+	const agentWorkflowExecutionService = Container.get(AgentWorkflowExecutionService);
+	const streamObserver = invocationContext
+		? createWorkflowAgentStreamObserver({
+				additionalData,
+				executionId,
+				invocation: invocationContext,
+			})
+		: undefined;
+	const runOptions: [] | [WorkflowAgentRunOptions] =
+		streamObserver || prepareForEval ? [{ streamObserver, prepareForEval }] : [];
+	if (!additionalData.workflowId) {
+		throw new UnexpectedError('Cannot execute agent without a workflowId in additional data');
+	}
 
-	const useDraftVersion = isManualOrChatExecution(executionMode);
+	const scopedThreadId = `workflow:project-${projectId}:${threadId}`;
+	// Eval runs grade what was built, so they run the draft, as a manual run does.
+	const useDraftVersion = prepareForEval !== undefined || isManualOrChatExecution(executionMode);
 
-	return await agentsService.executeForWorkflow(
-		agentId,
+	if (source.inlineAgent) {
+		return await agentWorkflowExecutionService.executeInlineForWorkflow(
+			source.inlineAgent,
+			message,
+			executionId,
+			scopedThreadId,
+			projectId,
+			telemetryUserId,
+			useDraftVersion ? 'test' : 'production',
+			outputSchema,
+			workflowContext,
+			...runOptions,
+		);
+	}
+
+	const { hashAgentSandboxPrincipal } = await import('@/modules/agents/agent-sandbox-principal.js');
+	const sandboxScope =
+		workflowContext?.hasCallerSessionId === true
+			? {
+					principalHash: hashAgentSandboxPrincipal({
+						type: 'project-session',
+						projectId,
+						sessionId: threadId,
+					}),
+				}
+			: {
+					principalHash: hashAgentSandboxPrincipal({
+						type: 'workflow-execution',
+						workflowId: additionalData.workflowId,
+						executionId,
+					}),
+				};
+
+	// A guardrail check execution must not re-enter the agent it guards: the
+	// nested turn would run the same check workflow again before its tool
+	// calls, without bound. Best-effort — an unreadable execution record
+	// allows the call.
+	if (additionalData.getRunExecutionData) {
+		const { GUARDRAIL_CHECK_FOR_KEY } = await import(
+			'@/modules/agents/tools/workflow-guardrail-check.js'
+		);
+		const runData = await Promise.resolve(additionalData.getRunExecutionData(executionId)).catch(
+			() => undefined,
+		);
+		if (runData?.resultData?.metadata?.[GUARDRAIL_CHECK_FOR_KEY] === source.agentId) {
+			throw new UserError(
+				'This agent is already running this workflow as a guardrail check. Remove the "Message an Agent" call to this agent from the guardrail check workflow.',
+			);
+		}
+	}
+
+	const result = await agentWorkflowExecutionService.executeForWorkflow(
+		source.agentId,
 		message,
 		executionId,
-		threadId,
-		userId,
+		scopedThreadId,
 		projectId,
 		telemetryUserId,
 		useDraftVersion,
+		outputSchema,
+		workflowContext,
+		sandboxScope,
+		...runOptions,
 	);
+
+	// Callers see the session id they supplied (or the derived per-call id), so
+	// feeding the output back into the node's Session ID continues the same
+	// conversation instead of re-prefixing. The scoped thread key stays
+	// internal, surfaced only as `session.threadId` for session deep links.
+	return result.session
+		? { ...result, session: { ...result.session, sessionId: threadId } }
+		: result;
 }
 
 async function listAgents(userId: string): Promise<Array<{ id: string; name: string }>> {
-	const { AgentsService } = await import('@/modules/agents/agents.service');
+	assertAgentsModuleActive();
+
+	// Executions check the Settings > Agents switch in the agents services. The listing must too.
+	const { AgentsSettingsService } = await import('@/modules/agents/agents-settings.service.js');
+	await Container.get(AgentsSettingsService).assertEnabled();
+
+	const { AgentsService } = await import('@/modules/agents/agents.service.js');
 	const agentsService = Container.get(AgentsService);
 	// Only published agents are runnable from a published workflow.
 	// But unpublished agents may be called from manual workflow executions (e.g. during development), so they are included in the list as well.
@@ -420,12 +631,36 @@ export function buildSubWorkflowOutput(
 	return WorkflowHelpers.getLastExecutedNodeData(data)?.data?.main ?? [null];
 }
 
+/**
+ * Stop an awaited sub-workflow when its parent is cancelled.
+ *
+ * Returns a function that removes the listener.
+ */
+function cancelWithParent(parentSignal: AbortSignal | undefined, executionId: string) {
+	if (!parentSignal) return () => {};
+
+	const stop = () =>
+		Container.get(ActiveExecutions).stopExecution(
+			executionId,
+			new ManualExecutionCancelledError(executionId),
+		);
+
+	if (parentSignal.aborted) {
+		stop();
+		return () => {};
+	}
+
+	parentSignal.addEventListener('abort', stop, { once: true });
+	return () => parentSignal.removeEventListener('abort', stop);
+}
+
 async function startExecution(
 	additionalData: IWorkflowExecuteAdditionalData,
 	options: ExecuteWorkflowOptions,
 	executionId: string,
 	runData: IWorkflowExecutionDataProcess,
 	workflowData: IWorkflowBase,
+	isInlineSubworkflow = false,
 ): Promise<ExecuteWorkflowData> {
 	const nodeTypes = Container.get(NodeTypes);
 	const activeExecutions = Container.get(ActiveExecutions);
@@ -443,39 +678,119 @@ async function startExecution(
 		settings: workflowData.settings,
 	});
 
-	/**
-	 * A subworkflow execution in queue mode is not enqueued, but rather runs in the
-	 * same worker process as the parent execution. Hence ensure the subworkflow
-	 * execution is marked as started as well.
-	 */
-	await executionRepository.setRunning(executionId);
-
 	const startTime = Date.now();
+	// A "library" sub-workflow can opt out of passing its own redaction to its caller. What it
+	// received from its own sub-workflows always passes up.
+	const includeOwn = workflowData.settings?.redactCallerExecutions !== false;
+
+	// Reported to the caller so its redaction covers this run's output: the parent's own
+	// nodes do not reference these credentials.
+	const workflowCredentialIds = Container.get(
+		CredentialsPermissionChecker,
+	).getCredentialIdsForNodes(workflowData.nodes);
+
+	// A failed sub-workflow returns an error, not a result. Attach to the error the private
+	// credentials that the sub-workflow used and the channels that it redacts. The parent reads
+	// them in `BaseExecuteContext.executeWorkflow`, also when its node continues on fail.
+	const buildErrorForParent = (
+		error: unknown,
+		executionData: IRunExecutionData | undefined,
+	): Error =>
+		attachSubWorkflowRedaction(
+			attachDynamicCredentialsUsage(
+				buildSubWorkflowError(error, workflow, {
+					executionId,
+					workflowId: workflowData.id,
+				}),
+				summarizeDynamicCredentialsUsage(executionData, workflowCredentialIds),
+			),
+			summarizeSubWorkflowRedaction(executionData, { includeOwn }),
+		);
+
+	let hooks: ExecutionLifecycleHooks | undefined;
+	// Why the run stopped, while no node of the sub-workflow can have run.
+	let blockedReason: ExecutionBlockedReason | undefined = 'startFailed';
 
 	let data;
 	try {
-		await Container.get(CredentialsPermissionChecker).check(workflowData.id, workflowData.nodes);
+		/**
+		 * A subworkflow execution in queue mode is not enqueued, but rather runs in the
+		 * same worker process as the parent execution. Hence ensure the subworkflow
+		 * execution is marked as started as well.
+		 */
+		await executionRepository.setRunning(executionId);
+
+		// The hooks read this object when the run ends, so the credential check
+		// below can still fill it in.
+		const telemetryMetadata: IWorkflowExecutionTelemetryMetadata = {};
+		hooks = getLifecycleHooksForSubExecutions(
+			runData.executionMode,
+			executionId,
+			workflowData,
+			additionalData.userId,
+			options.parentExecution,
+			undefined,
+			undefined,
+			telemetryMetadata,
+		);
+
+		// The original mode of the whole run tree: a sub-workflow's own
+		// `WorkflowExecute` always runs as 'integrated'. Same pattern as
+		// `credentials-helper`.
+		const rootExecutionMode = additionalData.rootExecutionMode ?? options.executionMode;
+
+		// A refused caller must not start executions in this workflow's project.
+		blockedReason = 'policy';
 		await Container.get(SubworkflowPolicyChecker).check(
 			workflow,
 			options.parentWorkflowId,
 			options.node,
 			additionalData.userId,
 		);
+		blockedReason = 'credentialAccess';
+
+		if (isInlineSubworkflow && additionalData.userId && isUserInitiated(rootExecutionMode)) {
+			// Inline sub-workflow triggered by a specific user: its credentials were
+			// never vetted against that user (they live only in the parameter JSON),
+			// so validate them against the user rather than the parent's project.
+			//
+			// Gated on the run being user-initiated, not merely on a user being
+			// present. Triggered runs now carry the publishing user for attribution,
+			// and that must not silently swap this project check for a user check —
+			// an ordinary project credential has to keep working on a schedule even
+			// if the publisher's own access to it has since changed.
+			await Container.get(CredentialsPermissionChecker).checkForUser(
+				additionalData.userId,
+				workflowData.nodes,
+			);
+		} else {
+			// A stored sub-workflow is checked against its own project, as before. The
+			// acting user rides along only for what that project does not carry: a
+			// credential reachable personally has to stay runnable by the person it
+			// belongs to, one level down as much as at the top.
+			const { personalCredentialsCount } = await Container.get(CredentialsPermissionChecker).check(
+				workflowData.id,
+				workflowData.nodes,
+				additionalData.userId,
+			);
+			telemetryMetadata.personalCredentialsCount = personalCredentialsCount;
+		}
+		blockedReason = 'startFailed';
 
 		// Create new additionalData to have different workflow loaded and to call
 		// different webhooks
 		const workflowSettings = workflowData.settings;
 		const additionalDataIntegrated = await getBase({
+			// The acting user crosses the boundary in both cases. Dropping it on a
+			// stored sub-workflow skipped the user check for any inline sub-workflow
+			// nested inside one: the inline branch below tests `additionalData.userId`,
+			// so an empty user sent it to the project check instead — and an inline
+			// sub-workflow has no project of its own to check against.
+			userId: additionalData.userId,
 			workflowId: workflowData.id,
 			workflowSettings,
 		});
-		additionalDataIntegrated.hooks = getLifecycleHooksForSubExecutions(
-			runData.executionMode,
-			executionId,
-			workflowData,
-			additionalData.userId,
-			options.parentExecution,
-		);
+		additionalDataIntegrated.hooks = hooks;
 		additionalDataIntegrated.executionId = executionId;
 		additionalDataIntegrated.parentCallbackManager = options.parentCallbackManager;
 
@@ -489,6 +804,10 @@ async function startExecution(
 		// mode (e.g. 'manual') even though their own WorkflowExecute runs as 'integrated'
 		additionalDataIntegrated.rootExecutionMode =
 			additionalData.rootExecutionMode ?? options.executionMode;
+		// Propagate the eval run id so sub-workflows of an eval run expose `$evaluation.runId`
+		additionalDataIntegrated.evaluationRunId = additionalData.evaluationRunId;
+		// A simulated-services eval run sends its sub-workflows' requests to the sim server too
+		additionalDataIntegrated.evalEgressProxy = additionalData.evalEgressProxy;
 		if (additionalData.httpResponse) {
 			additionalDataIntegrated.httpResponse = additionalData.httpResponse;
 		}
@@ -512,10 +831,20 @@ async function startExecution(
 			additionalDataIntegrated,
 			runData.executionMode,
 			runExecutionData,
+			Container.get(StorageConfig).modeTag,
 		);
 		const execution = workflowExecute.processRunExecutionData(workflow);
+		// The engine marks its own early failures once it has started.
+		blockedReason = undefined;
 		activeExecutions.attachWorkflowExecution(executionId, execution);
-		data = await execution;
+		const stopWithParent = options.doNotWaitToFinish
+			? () => {}
+			: cancelWithParent(options.abortSignal, executionId);
+		try {
+			data = await execution;
+		} finally {
+			stopWithParent();
+		}
 	} catch (error) {
 		const executionError = error as ExecutionError;
 		const fullRunData = Container.get(FailedRunFactory).generateFailedExecutionFromError(
@@ -524,6 +853,7 @@ async function startExecution(
 			'node' in executionError ? executionError.node : undefined,
 			startTime,
 		);
+		if (blockedReason) fullRunData.data.resultData.failedBeforeStart = blockedReason;
 
 		// When failing, we might not have finished the execution
 		// Therefore, database might not contain finished errors.
@@ -532,6 +862,7 @@ async function startExecution(
 		const fullExecutionData: UpdateExecutionPayload = {
 			data: fullRunData.data,
 			mode: fullRunData.mode,
+			// oxlint-disable-next-line typescript/no-deprecated
 			finished: fullRunData.finished ? fullRunData.finished : false,
 			startedAt: fullRunData.startedAt,
 			stoppedAt: fullRunData.stoppedAt,
@@ -545,45 +876,83 @@ async function startExecution(
 
 		activeExecutions.finalizeExecution(executionId, fullRunData);
 
-		await executionRepository.updateExistingExecution(executionId, fullExecutionData);
-		throw objectToError(
-			{
-				...executionError,
+		// The engine's own save may have finished the run already. Only the write that did records `ended`.
+		const saveFailure = async () => {
+			const { ended } = await Container.get(ExecutionPersistence).saveExecutionOutcome(
+				executionId,
+				fullExecutionData,
+			);
+			const executionLedger = Container.get(ExecutionLedger);
+			if (!ended || !executionLedger.isEnabled) return;
+
+			const facts = toEndedFactsFromRun({ executionId, workflow: workflowData, run: fullRunData });
+			if (facts) void executionLedger.recordEnded(facts);
+		};
+
+		// Nothing else records this failure, and a detached caller never sees the error.
+		const logUnrecordedFailure = (recordError: unknown) =>
+			Container.get(Logger).error('Failed to record a failed sub-workflow execution', {
 				executionId,
 				workflowId: workflowData.id,
-				stack: executionError?.stack,
-				message: executionError?.message,
-			},
-			workflow,
-		);
+				error: recordError,
+			});
+
+		try {
+			if (hooks && blockedReason === 'credentialAccess') {
+				// `WorkflowExecute` never started, so run its hooks here, as `WorkflowRunner.failExecution`
+				// does for a top-level run. The save hook stores the failure and starts the error workflow.
+				// No workflow instance: nothing runs, so the before hooks skip their pre-run gates.
+				await hooks
+					.runHook('workflowExecuteBefore', [undefined, runData.executionData])
+					.catch((hookError: unknown) =>
+						Container.get(Logger).warn('A before hook failed for a failed sub-workflow execution', {
+							executionId,
+							workflowId: workflowData.id,
+							error: hookError,
+						}),
+					);
+				await hooks
+					.runHook('workflowExecuteAfter', [fullRunData])
+					.catch(async (hookError: unknown) => {
+						// A handler that throws stops the save hook, so store the failure here.
+						Container.get(Logger).warn('An after hook failed for a failed sub-workflow execution', {
+							executionId,
+							workflowId: workflowData.id,
+							error: hookError,
+						});
+						await saveFailure();
+					});
+			} else {
+				await saveFailure();
+			}
+		} catch (recordError) {
+			logUnrecordedFailure(recordError);
+		}
+
+		// The engine mutates `runData.executionData` in place, so a mid-run crash may leave
+		// credential flags on already-executed tasks.
+		throw buildErrorForParent(executionError, runData.executionData);
 	}
 
-	// subworkflow either finished, or is in status waiting due to a wait node, both cases are considered successes here
-	if (data.finished === true || data.status === 'waiting') {
-		// Workflow did finish successfully
-
-		activeExecutions.finalizeExecution(executionId, data);
-
-		return {
-			executionId,
-			data: buildSubWorkflowOutput(data, workflowData.nodes, options.returnLastRunOnly ?? false),
-			waitTill: data.waitTill,
-		};
-	}
 	activeExecutions.finalizeExecution(executionId, data);
 
-	// Workflow did fail
-	const { error } = data.data.resultData;
-
-	throw objectToError(
-		{
-			...error,
+	// subworkflow either finished, or is in status waiting due to a wait node, both cases are considered successes here
+	// oxlint-disable-next-line typescript/no-deprecated
+	if (data.finished === true || data.status === 'waiting') {
+		return {
 			executionId,
-			workflowId: workflowData.id,
-			stack: error?.stack,
-		},
-		workflow,
-	);
+			data: data.data.subWorkflowOutput
+				? await collectSubWorkflowOutput(data, workflow, data.data.subWorkflowOutput)
+				: buildSubWorkflowOutput(data, workflowData.nodes, options.returnLastRunOnly ?? false),
+			waitTill: data.waitTill,
+			// Report private-credential usage to the caller (detached runs return earlier, skipping this).
+			...summarizeDynamicCredentialsUsage(data.data, workflowCredentialIds),
+			// The caller keeps a copy of the output above, so it must redact what this run redacts.
+			subWorkflowRedaction: summarizeSubWorkflowRedaction(data.data, { includeOwn }),
+		};
+	} else {
+		throw buildErrorForParent(data.data.resultData.error, data.data);
+	}
 }
 
 export function setExecutionStatus(this: { executionId?: string }, status: ExecutionStatus) {
@@ -597,11 +966,11 @@ export function setExecutionStatus(this: { executionId?: string }, status: Execu
 }
 
 export function sendDataToUI(
-	this: { pushRef?: string },
+	this: { pushRef?: string; userId?: string },
 	type: PushType,
 	data: IDataObject | IDataObject[],
 ) {
-	const { pushRef } = this;
+	const { pushRef, userId } = this;
 	if (pushRef === undefined) {
 		return;
 	}
@@ -609,7 +978,7 @@ export function sendDataToUI(
 	// Push data to session which started workflow
 	try {
 		const pushInstance = Container.get(Push);
-		pushInstance.send({ type, data } as PushMessage, pushRef);
+		pushInstance.send({ type, data } as PushMessage, pushRef, userId);
 	} catch (error) {
 		const logger = Container.get(Logger);
 		logger.warn(`There was a problem sending message to UI: ${error.message}`);
@@ -625,6 +994,23 @@ export function sendDataToUI(
  * param currentNodeParameters - The parameters of the currently executing node
  * param executionTimeoutTimestamp - The timestamp (in ms) when the execution should time out
  */
+/**
+ * Whether a person asked for this run. Anything outside this set either carries
+ * no user at all, or carries the publishing user that `WorkflowPublisherService`
+ * attaches for attribution — and a stand-in for "who owns this workflow" must
+ * not be read as "who asked for this".
+ *
+ * Deliberately broader than {@link isManualOrChatExecution}: a retry and an
+ * evaluation are started by a real user too, and both carried a `userId` long
+ * before any of this existed.
+ */
+function isUserInitiated(executionMode: WorkflowExecuteMode | undefined): boolean {
+	if (!executionMode) return false;
+	return (['manual', 'chat', 'retry', 'evaluation'] as WorkflowExecuteMode[]).includes(
+		executionMode,
+	);
+}
+
 export async function getBase({
 	userId,
 	workflowId,
@@ -642,15 +1028,43 @@ export async function getBase({
 } = {}): Promise<IWorkflowExecuteAdditionalData> {
 	const urlService = Container.get(UrlService);
 	const urlBaseWebhook = urlService.getWebhookBaseUrl();
+	const urlBaseTestWebhook = urlService.getTestWebhookBaseUrl();
 	const instanceBaseUrl = urlService.getInstanceBaseUrl();
 
 	const globalConfig = Container.get(GlobalConfig);
 
+	// Trigger-fired, webhook, and worker-queued executions build additionalData without
+	// a `projectId`. Resolve it from the workflow's owning project so every downstream
+	// consumer (e.g. policy enforcement) sees the executing project, same as
+	// `executeAgent` already does locally for its own use. Left unguarded on purpose,
+	// matching `getVariables`'s own pre-existing lookup below: an unresolvable owner
+	// project fails execution setup, it isn't silently tolerated.
+	if (!projectId && workflowId) {
+		const { OwnershipService } = await import('@/services/ownership.service.js');
+		const project = await Container.get(OwnershipService).getWorkflowProjectCached(workflowId);
+		projectId = project?.id;
+	}
+
 	const variables = await WorkflowHelpers.getVariables(workflowId, projectId);
 
 	const eventService = Container.get(EventService);
+	const grantedBinaryDataIds = new Set<string>();
 
 	const additionalData: IWorkflowExecuteAdditionalData = {
+		binaryDataAccess: {
+			grant: (binaryDataId) => grantedBinaryDataIds.add(binaryDataId),
+			isGranted: (binaryDataId) => grantedBinaryDataIds.has(binaryDataId),
+			async isAllowed(binaryDataId, executingWorkflowId, grantedIds) {
+				if (grantedBinaryDataIds.has(binaryDataId) || grantedIds?.includes(binaryDataId)) {
+					return true;
+				}
+
+				return await Container.get(BinaryDataAccessService).isOwnedByWorkflow(
+					executingWorkflowId,
+					binaryDataId,
+				);
+			},
+		},
 		currentNodeExecutionIndex: 0,
 		credentialsHelper: Container.get(CredentialsHelper),
 		executeWorkflow,
@@ -659,9 +1073,13 @@ export async function getBase({
 		restApiUrl: urlBaseWebhook + globalConfig.endpoints.rest,
 		instanceBaseUrl: `${instanceBaseUrl}/`,
 		formWaitingBaseUrl: urlBaseWebhook + globalConfig.endpoints.formWaiting,
+		formBaseUrl: urlBaseWebhook + globalConfig.endpoints.form,
+		formTestBaseUrl: urlBaseTestWebhook + globalConfig.endpoints.formTest,
 		webhookBaseUrl: urlBaseWebhook + globalConfig.endpoints.webhook,
 		webhookWaitingBaseUrl: urlBaseWebhook + globalConfig.endpoints.webhookWaiting,
-		webhookTestBaseUrl: urlBaseWebhook + globalConfig.endpoints.webhookTest,
+		webhookTestBaseUrl: urlBaseTestWebhook + globalConfig.endpoints.webhookTest,
+		mcpBaseUrl: urlBaseWebhook + globalConfig.endpoints.mcp,
+		mcpTestBaseUrl: urlBaseTestWebhook + globalConfig.endpoints.mcpTest,
 		currentNodeParameters,
 		executionTimeoutTimestamp,
 		userId,
@@ -677,8 +1095,8 @@ export async function getBase({
 			);
 		},
 		async getRunExecutionData(executionId) {
-			const executionRepository = Container.get(ExecutionRepository);
-			const executionData = await executionRepository.findSingleExecution(executionId, {
+			const executionPersistence = Container.get(ExecutionPersistence);
+			const executionData = await executionPersistence.findSingleExecution(executionId, {
 				unflattenData: true,
 				includeData: true,
 			});
@@ -686,48 +1104,15 @@ export async function getBase({
 			return executionData?.data;
 		},
 		externalSecretsProxy: Container.get(ExternalSecretsProxy),
-		async startRunnerTask(
-			additionalData: IWorkflowExecuteAdditionalData,
-			jobType: string,
-			settings: unknown,
-			executeFunctions: IExecuteFunctions,
-			inputData: ITaskDataConnections,
-			node: INode,
-			workflow: Workflow,
-			runExecutionData: IRunExecutionData,
-			runIndex: number,
-			itemIndex: number,
-			activeNodeName: string,
-			connectionInputData: INodeExecutionData[],
-			siblingParameters: INodeParameters,
-			mode: WorkflowExecuteMode,
-			envProviderState: EnvProviderState,
-			executeData?: IExecuteData,
-		) {
-			return await Container.get(TaskRequester).startTask(
-				additionalData,
-				jobType,
-				settings,
-				executeFunctions,
-				inputData,
-				node,
-				workflow,
-				runExecutionData,
-				runIndex,
-				itemIndex,
-				activeNodeName,
-				connectionInputData,
-				siblingParameters,
-				mode,
-				envProviderState,
-				executeData,
-			);
-		},
+		startRunnerTask: async (...args) =>
+			await Container.get(CodeExecutionBackend).runTask(toCodeTaskRequest(...args)),
 		logAiEvent: (eventName: AiEvent, payload: AiEventPayload) => {
 			eventService.emit(eventName, payload);
 		},
-		getRunnerStatus: (taskType: string) =>
-			Container.get(TaskRequester as ServiceIdentifier<TaskRequester>).getRunnerStatus(taskType),
+		logHitlResponse: (payload) => {
+			eventService.emit('hitl-response-actioned', payload);
+		},
+		getRunnerStatus: (taskType: string) => Container.get(CodeExecutionBackend).getStatus(taskType),
 	};
 
 	const ssrfConfig = Container.get(SsrfProtectionConfig);

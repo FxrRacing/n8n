@@ -1,14 +1,17 @@
-import { mockDeep } from 'jest-mock-extended';
+import type { DeepMockProxy } from 'vitest-mock-extended';
+import { mockDeep } from 'vitest-mock-extended';
+import type { Mock, MockInstance } from 'vitest';
 import type { IExecuteFunctions, INode } from 'n8n-workflow';
+import { requestPath } from 'n8n-workflow';
 
 import * as GenericFunctions from '../../V1/GenericFunctions';
 import { SlackV1 } from '../../V1/SlackV1.node';
 
 describe('SlackV1 — multiOptions parameter normalization', () => {
 	let node: SlackV1;
-	let mockExecuteFunctions: jest.Mocked<IExecuteFunctions>;
-	let slackApiRequestSpy: jest.SpyInstance;
-	let slackApiRequestAllItemsSpy: jest.SpyInstance;
+	let mockExecuteFunctions: DeepMockProxy<IExecuteFunctions>;
+	let slackApiRequestSpy: MockInstance;
+	let slackApiRequestAllItemsSpy: MockInstance;
 
 	const mockNode: INode = {
 		id: 'test-node-id',
@@ -28,15 +31,15 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 		});
 
 		mockExecuteFunctions = mockDeep<IExecuteFunctions>();
-		slackApiRequestSpy = jest.spyOn(GenericFunctions, 'slackApiRequest');
-		slackApiRequestAllItemsSpy = jest.spyOn(GenericFunctions, 'slackApiRequestAllItems');
+		slackApiRequestSpy = vi.spyOn(GenericFunctions, 'slackApiRequest');
+		slackApiRequestAllItemsSpy = vi.spyOn(GenericFunctions, 'slackApiRequestAllItems');
 
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 
 		mockExecuteFunctions.getInputData.mockReturnValue([{ json: {} }]);
 		mockExecuteFunctions.getNode.mockReturnValue(mockNode);
 		mockExecuteFunctions.continueOnFail.mockReturnValue(false);
-		(mockExecuteFunctions.helpers.constructExecutionMetaData as jest.Mock).mockImplementation(
+		(mockExecuteFunctions.helpers.constructExecutionMetaData as Mock).mockImplementation(
 			(data: any, options: any) => {
 				return data.map((item: any, index: number) => ({
 					...item,
@@ -44,13 +47,13 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 				}));
 			},
 		);
-		(mockExecuteFunctions.helpers.returnJsonArray as jest.Mock).mockImplementation((data: any) => {
+		(mockExecuteFunctions.helpers.returnJsonArray as Mock).mockImplementation((data: any) => {
 			return [{ json: data }];
 		});
 	});
 
 	afterEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 	});
 
 	const mockParams = (params: Record<string, any>) => {
@@ -75,7 +78,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'GET',
-				'/conversations.list',
+				requestPath`/conversations.list`,
 				{},
 				expect.objectContaining({ types: 'public_channel,private_channel' }),
 			);
@@ -96,7 +99,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'GET',
-				'/conversations.list',
+				requestPath`/conversations.list`,
 				{},
 				expect.objectContaining({ types: 'public_channel,private_channel' }),
 			);
@@ -118,7 +121,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'POST',
-				'/conversations.invite',
+				requestPath`/conversations.invite`,
 				{ channel: 'C123456789', users: 'U111111111,U222222222' },
 				{},
 			);
@@ -138,7 +141,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'POST',
-				'/conversations.invite',
+				requestPath`/conversations.invite`,
 				{ channel: 'C123456789', users: 'U111111111,U222222222' },
 				{},
 			);
@@ -159,7 +162,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'POST',
-				'/conversations.open',
+				requestPath`/conversations.open`,
 				{ users: 'U111111111,U222222222', return_im: true },
 				{},
 			);
@@ -178,7 +181,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'POST',
-				'/conversations.open',
+				requestPath`/conversations.open`,
 				{ users: 'U111111111,U222222222' },
 				{},
 			);
@@ -201,7 +204,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'POST',
-				'/files.upload',
+				requestPath`/files.upload`,
 				expect.objectContaining({ channels: 'C111111111,C222222222' }),
 				{},
 				{ 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -226,7 +229,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 
 			expect(slackApiRequestSpy).toHaveBeenCalledWith(
 				'POST',
-				'/files.upload',
+				requestPath`/files.upload`,
 				expect.objectContaining({ channels: 'C111111111,C222222222' }),
 				{},
 				{ 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -251,7 +254,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 			expect(slackApiRequestAllItemsSpy).toHaveBeenCalledWith(
 				'files',
 				'GET',
-				'/files.list',
+				requestPath`/files.list`,
 				{},
 				expect.objectContaining({ types: 'images,pdfs' }),
 			);
@@ -272,7 +275,7 @@ describe('SlackV1 — multiOptions parameter normalization', () => {
 			expect(slackApiRequestAllItemsSpy).toHaveBeenCalledWith(
 				'files',
 				'GET',
-				'/files.list',
+				requestPath`/files.list`,
 				{},
 				expect.objectContaining({ types: 'images,pdfs' }),
 			);

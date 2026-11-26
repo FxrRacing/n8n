@@ -6,7 +6,7 @@
  */
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseMessage, AIMessage } from '@langchain/core/messages';
-import { HumanMessage, ToolMessage, isAIMessage } from '@langchain/core/messages';
+import { HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import type { Runnable, RunnableConfig } from '@langchain/core/runnables';
 import { tool, type StructuredTool } from '@langchain/core/tools';
@@ -25,7 +25,6 @@ import { LLMServiceError } from '@/errors';
 import type { ParentGraphState } from '@/parent-graph-state';
 import { buildDiscoveryPrompt } from '@/prompts';
 import { createGetDocumentationTool } from '@/tools/get-documentation.tool';
-import { createGetWorkflowExamplesTool } from '@/tools/get-workflow-examples.tool';
 import {
 	createIntrospectTool,
 	extractIntrospectionEventsFromMessages,
@@ -33,6 +32,7 @@ import {
 import { createNodeSearchTool } from '@/tools/node-search.tool';
 import { submitQuestionsTool } from '@/tools/submit-questions.tool';
 import { createPassthroughSsrfGuard, type SsrfGuard } from '@/tools/utils/ssrf-guard';
+import { isAIMessage } from '@/types/langchain';
 import {
 	createLangGraphSecurityManagerFactory,
 	createMutableSecurityManagerFactory,
@@ -279,7 +279,6 @@ export class DiscoverySubgraph extends BaseSubgraph<
 		this.parsedNodeTypes = config.parsedNodeTypes;
 
 		// Check feature flags
-		const includeExamples = config.featureFlags?.templateExamples === true;
 		const enableIntrospection = config.featureFlags?.enableIntrospection === true;
 
 		// Create security manager factories for web_fetch in each context
@@ -301,14 +300,7 @@ export class DiscoverySubgraph extends BaseSubgraph<
 			baseTools.push(createIntrospectTool(config.logger).tool);
 		}
 
-		// Conditionally add documentation and workflow examples tools if feature flag is enabled
-		const tools = includeExamples
-			? [
-					...baseTools,
-					createGetDocumentationTool().tool,
-					createGetWorkflowExamplesTool(config.logger).tool,
-				]
-			: baseTools;
+		const tools = baseTools;
 
 		this.toolMap = new Map(tools.map((toolInstance) => [toolInstance.name, toolInstance]));
 
@@ -319,10 +311,7 @@ export class DiscoverySubgraph extends BaseSubgraph<
 			schema: discoveryOutputSchema,
 		});
 
-		// Generate prompt based on feature flags
-		const discoveryPrompt = buildDiscoveryPrompt({
-			includeExamples,
-		});
+		const discoveryPrompt = buildDiscoveryPrompt();
 
 		// Create agent with tools bound (including submit tool)
 		const systemPrompt = ChatPromptTemplate.fromMessages([
@@ -541,7 +530,7 @@ export class DiscoverySubgraph extends BaseSubgraph<
 				'[Discovery] No submit_discovery_results tool call found - agent may have stopped early',
 				{
 					messageCount: state.messages.length,
-					lastMessageType: lastMessage?.getType(),
+					lastMessageType: lastMessage?.type,
 				},
 			);
 			return {

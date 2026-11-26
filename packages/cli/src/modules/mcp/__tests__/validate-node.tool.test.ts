@@ -1,17 +1,16 @@
+import { TelemetryProxy } from '@n8n/backend-services';
 import { mockInstance } from '@n8n/backend-test-utils';
 import { User } from '@n8n/db';
 
 import { createValidateNodeTool } from '../tools/workflow-builder/validate-node.tool';
 
-import { Telemetry } from '@/telemetry';
+const mockValidateNodeConfig = vi.fn();
 
-const mockValidateNodeConfig = jest.fn();
-
-jest.mock('@n8n/workflow-sdk', () => ({
+vi.mock('@n8n/workflow-sdk', () => ({
 	validateNodeConfig: (...args: unknown[]) => mockValidateNodeConfig(...args),
 }));
 
-jest.mock('@n8n/ai-workflow-builder', () => ({
+vi.mock('@n8n/ai-workflow-builder', () => ({
 	CODE_BUILDER_VALIDATE_NODE_TOOL: {
 		toolName: 'validate_node_config',
 		displayTitle: 'Validating node config',
@@ -24,11 +23,11 @@ const parseResult = (result: { content: Array<{ type: string; text?: string }> }
 
 describe('validate-node MCP tool', () => {
 	const user = Object.assign(new User(), { id: 'user-1' });
-	let telemetry: Telemetry;
+	let telemetry: TelemetryProxy;
 
 	beforeEach(() => {
-		jest.clearAllMocks();
-		telemetry = mockInstance(Telemetry, { track: jest.fn() });
+		vi.clearAllMocks();
+		telemetry = mockInstance(TelemetryProxy, { track: vi.fn() });
 	});
 
 	const createTool = () => createValidateNodeTool(user, telemetry);

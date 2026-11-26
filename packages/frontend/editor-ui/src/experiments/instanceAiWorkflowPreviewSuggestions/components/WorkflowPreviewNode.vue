@@ -37,6 +37,7 @@ const iconName = computed(() =>
 const iconSrc = computed(() =>
 	activeIcon.value.type === 'file' ? activeIcon.value.src : undefined,
 );
+const iconLightInvert = computed(() => activeIcon.value.lightInvert === true);
 </script>
 
 <template>
@@ -52,11 +53,17 @@ const iconSrc = computed(() =>
 		<div :class="$style.iconWrapper" :style="iconWrapperStyle">
 			<N8nIcon v-if="iconName" :icon="iconName" :size="48" />
 			<Transition v-else-if="iconSrc" :name="$style.swipe" mode="out-in">
-				<img :key="iconSrc" :src="iconSrc" :class="$style.iconImage" />
+				<img
+					:key="iconSrc"
+					:src="iconSrc"
+					:class="[$style.iconImage, iconLightInvert && $style.lightInvert]"
+				/>
 			</Transition>
 			<span v-else :class="$style.iconFallback">{{ props.node.label.charAt(0) }}</span>
 		</div>
-		<span :class="$style.label">{{ props.node.label }}</span>
+		<slot name="label">
+			<span :class="$style.label">{{ props.node.label }}</span>
+		</slot>
 	</div>
 </template>
 
@@ -79,9 +86,12 @@ const iconSrc = computed(() =>
 	border-radius: var(--radius--lg);
 	background: var(--node--color--background, var(--color--background--light-3));
 	border: 1.5px solid
-		light-dark(
-			oklch(from var(--color--neutral-black) l c h / 0.1),
-			oklch(from var(--color--neutral-white) l c h / 0.15)
+		var(
+			--node--border-color,
+			light-dark(
+				oklch(from var(--color--neutral-black) l c h / 0.1),
+				oklch(from var(--color--neutral-white) l c h / 0.15)
+			)
 		);
 	color: var(--node--icon--color, var(--color--foreground--shade-1));
 	transition: border-color 0.2s ease;
@@ -135,9 +145,23 @@ const iconSrc = computed(() =>
 	height: auto;
 }
 
+.lightInvert {
+	filter: invert(1);
+}
+
+:global([data-theme='dark']) .lightInvert {
+	filter: none;
+}
+
+@media (prefers-color-scheme: dark) {
+	:global(body:not([data-theme])) .lightInvert {
+		filter: none;
+	}
+}
+
 .iconFallback {
 	font-size: var(--font-size--2xl);
-	font-weight: var(--font-weight--bold);
+	font-weight: var(--font-weight--medium);
 }
 
 .label {

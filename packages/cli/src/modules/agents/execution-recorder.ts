@@ -1,7 +1,23 @@
 import type { StreamChunk } from '@n8n/agents';
+import {
+	applyForwardedChildChunk,
+	emptyChildTrace,
+	settleChildTrace,
+	WORKFLOW_WAIT_SUSPEND_TYPE,
+	type PersistedChildTrace,
+	type AgentBackgroundJobSignal,
+} from '@n8n/api-types';
+import { isRecord } from '@n8n/utils/is-record';
+import { isSensitiveKey } from '@n8n/utils/redaction/sensitive-key';
+import { scrubSecretsInText } from '@n8n/utils/scrub-secrets';
 import { extractFromAICalls, isFromAIOnlyExpression } from 'n8n-workflow';
 
-import type { ToolRegistry } from './tool-registry';
+import type { ToolRegistry, ToolRegistryEntry } from './tool-registry';
+
+/** Cap on child trace characters persisted per delegation. Tighter than the
+ *  live forwarding budget because this is written into every parent execution row. */
+const CHILD_TRACE_PERSIST_CHAR_BUDGET = 4_000;
+const TIMELINE_BLOCK_MAX_DURATION_MS = 1_000;
 
 /**
  * Walk a nodeParameters tree and substitute templated values with what the
@@ -138,25 +154,81 @@ function normaliseToolErrorOutput(output: unknown): unknown {
 	return output;
 }
 
+function normaliseStreamError(error: unknown): string {
+	if (error instanceof Error) {
+		return scrubSecretsInText(error.message || error.name || 'Agent execution failed');
+	}
+	if (typeof error === 'string') return scrubSecretsInText(error);
+
+	const sanitized = sanitizeExecutionLogValue(error);
+	try {
+		return scrubSecretsInText(JSON.stringify(sanitized));
+	} catch {
+		return scrubSecretsInText(String(error));
+	}
+}
+
+const REDACTED_VALUE = '[REDACTED]';
+const CIRCULAR_VALUE = '[Circular]';
+
+function sanitizeExecutionLogValue(value: unknown, seen = new WeakSet<object>()): unknown {
+	if (typeof value === 'string') return scrubSecretsInText(value);
+
+	if (Array.isArray(value)) {
+		if (seen.has(value)) return CIRCULAR_VALUE;
+		seen.add(value);
+		const sanitized = value.map((item) => sanitizeExecutionLogValue(item, seen));
+		seen.delete(value);
+		return sanitized;
+	}
+
+	if (!isRecord(value)) return value;
+
+	if (seen.has(value)) return CIRCULAR_VALUE;
+	seen.add(value);
+
+	const sanitized: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(value)) {
+		sanitized[key] = isSensitiveKey(key) ? REDACTED_VALUE : sanitizeExecutionLogValue(item, seen);
+	}
+
+	seen.delete(value);
+	return sanitized;
+}
+
+function sanitizeExecutionLogRecord(value: unknown): Record<string, unknown> | undefined {
+	const sanitized = sanitizeExecutionLogValue(value);
+	return isRecord(sanitized) ? sanitized : undefined;
+}
+
+export function buildApprovalArgs(input: unknown, entry?: ToolRegistryEntry): unknown {
+	const sanitizedInput = sanitizeExecutionLogValue(input);
+	if (!entry?.nodeParameters || Object.keys(entry.nodeParameters).length === 0) {
+		return sanitizedInput;
+	}
+
+	return {
+		parameters: sanitizeExecutionLogRecord(
+			resolveTemplatesInValue(entry.nodeParameters, isRecord(sanitizedInput) ? sanitizedInput : {}),
+		),
+		...(isRecord(input) && Object.keys(input).length === 0 ? {} : { input: sanitizedInput }),
+	};
+}
+
 export interface RecordedUsage {
 	promptTokens: number;
 	completionTokens: number;
 	totalTokens: number;
 }
 
-export interface RecordedToolCall {
-	name: string;
-	input: unknown;
-	output: unknown;
-}
-
-type PendingRecordedToolCall = RecordedToolCall & { toolCallId?: string };
-
 export type TimelineEvent =
+	| { type: 'input'; messageId: string; timestamp: number }
+	| { type: 'background-task-signal'; signal: AgentBackgroundJobSignal; timestamp: number }
 	| { type: 'text'; content: string; timestamp: number; endTime?: number }
+	| { type: 'reasoning'; content: string; timestamp: number; endTime?: number }
 	| {
 			type: 'tool-call';
-			kind: 'tool' | 'workflow' | 'node';
+			kind: ToolRegistryEntry['kind'];
 			name: string;
 			toolCallId: string;
 			input: unknown;
@@ -164,6 +236,7 @@ export type TimelineEvent =
 			startTime: number;
 			endTime: number;
 			success: boolean;
+			canceled?: boolean;
 			workflowId?: string;
 			workflowName?: string;
 			workflowExecutionId?: string;
@@ -178,12 +251,38 @@ export type TimelineEvent =
 			 * detail viewer can show what the node was set up to do.
 			 */
 			nodeParameters?: Record<string, unknown>;
+			childTrace?: PersistedChildTrace;
+			/** Host-only data from the tool's `toTraceOutput`, e.g. recalled memory entry ids. */
+			traceOutput?: unknown;
 	  }
-	| { type: 'suspension'; toolName: string; toolCallId: string; timestamp: number };
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-	return typeof v === 'object' && v !== null;
-}
+	| {
+			type: 'suspension';
+			toolName: string;
+			toolCallId: string;
+			timestamp: number;
+			input?: unknown;
+			suspendPayload?: unknown;
+	  }
+	| {
+			type: 'hitl-response';
+			toolCallId: string;
+			response: unknown;
+			timestamp: number;
+	  }
+	| {
+			type: 'guardrail';
+			code: string;
+			timestamp: number;
+	  }
+	| {
+			/** A custom event that a system-agent provider emitted during the turn. */
+			type: 'host-event';
+			name: string;
+			/** A later event with the same name and key replaces this one. */
+			key?: string;
+			payload: unknown;
+			timestamp: number;
+	  };
 
 /**
  * Collects execution data from agent stream chunks.
@@ -195,18 +294,52 @@ export interface MessageRecord {
 	finishReason: string;
 	usage: RecordedUsage | null;
 	totalCost: number | null;
-	toolCalls: RecordedToolCall[];
+	/** Input tokens read from the prompt cache. A subset of `usage.promptTokens`. */
+	cacheReadTokens: number | null;
+	/** Input tokens written to the prompt cache. A subset of `usage.promptTokens`. */
+	cacheWriteTokens: number | null;
 	timeline: TimelineEvent[];
 	startTime: number;
 	duration: number;
 	error: string | null;
+	guardrailCode: string | null;
 }
 
 export class ExecutionRecorder {
 	private readonly registry: ToolRegistry;
 
-	constructor(registry?: ToolRegistry) {
+	constructor(
+		registry?: ToolRegistry,
+		private readonly onTimelineSnapshot?: (timeline: TimelineEvent[]) => void,
+		backgroundJobSignal?: AgentBackgroundJobSignal,
+		startedAt: Date = new Date(),
+	) {
+		this.startTime = startedAt.getTime();
 		this.registry = registry ?? new Map();
+
+		if (backgroundJobSignal) {
+			this.timeline.push({
+				type: 'background-task-signal',
+				timestamp: this.startTime,
+				signal: {
+					...(backgroundJobSignal.isFinal ? { isFinal: true } : {}),
+					tasks: backgroundJobSignal.tasks.map(({ id, title, kind, status, files }) => ({
+						id,
+						title: scrubSecretsInText(title),
+						kind,
+						status,
+						...(files?.length
+							? {
+									files: files.map((file) => ({
+										...file,
+										fileName: scrubSecretsInText(file.fileName),
+									})),
+								}
+							: {}),
+					})),
+				},
+			});
+		}
 	}
 
 	private textParts: string[] = [];
@@ -214,37 +347,162 @@ export class ExecutionRecorder {
 	/** Text buffer for the current segment (flushed to timeline on boundaries). */
 	private textBuffer: string[] = [];
 
+	/** Reasoning buffer for the current segment (kept separate from user-facing text). */
+	private reasoningBuffer: string[] = [];
+
 	private model: string | null = null;
 
 	private finishReason = 'unknown';
+
+	private guardrailCode: string | null = null;
 
 	private usage: RecordedUsage | null = null;
 
 	private totalCost: number | null = null;
 
-	private toolCalls: PendingRecordedToolCall[] = [];
+	private cacheReadTokens: number | null = null;
+
+	private cacheWriteTokens: number | null = null;
 
 	private timeline: TimelineEvent[] = [];
 
 	/** Wall-clock when the first text-delta of the current segment arrived. */
 	private textStartTime: number | null = null;
 
+	/** Wall-clock when the current reasoning segment started. */
+	private reasoningStartTime: number | null = null;
+
+	private timelineSnapshotTimer?: NodeJS.Timeout;
+
 	private _suspended = false;
 
 	private error: string | null = null;
 
-	private readonly startTime = Date.now();
+	private readonly startTime: number;
+
+	private childTraceChars = new Map<string, number>();
+
+	/** Record additional input only after its transaction commits. */
+	recordInputs(events: Array<Extract<TimelineEvent, { type: 'input' }>>): void {
+		this.flushReasoningBuffer();
+		this.flushTextBuffer();
+		for (const event of events) {
+			if (this.timeline.some((item) => item.type === 'input' && item.messageId === event.messageId))
+				continue;
+			this.appendCompletedEvent(event);
+		}
+	}
+
+	/** Record the human response that caused a suspended tool call to resume. */
+	recordHitlResponse(toolCallId: string, response: unknown): void {
+		this.flushReasoningBuffer();
+		this.flushTextBuffer();
+		// The workflow wake-up arrives before its approval result is read.
+		const wakeUp = this.timeline.findIndex(
+			(event) =>
+				event.type === 'hitl-response' &&
+				event.toolCallId === toolCallId &&
+				isRecord(event.response) &&
+				event.response.type === 'workflow_finished',
+		);
+		if (wakeUp !== -1 && isRecord(response) && typeof response.approved === 'boolean') {
+			this.timeline.splice(wakeUp, 1);
+		}
+		this.appendCompletedEvent({
+			type: 'hitl-response',
+			toolCallId,
+			response: sanitizeExecutionLogValue(response),
+			timestamp: Date.now(),
+		});
+	}
+
+	/**
+	 * Record a custom host event at its position in the turn. The payload is
+	 * stored as the host sent it. Host code builds it, not the model, and the
+	 * secret heuristics of the other recorded values damage ordinary fields
+	 * such as `credentialType`. When the turn already has an event with the
+	 * same name and key, the new payload replaces the old one in its position.
+	 * Returns the recorded event, so that the live stream can send the same
+	 * payload.
+	 */
+	recordHostEvent(
+		name: string,
+		payload: unknown,
+		key?: string,
+	): Extract<TimelineEvent, { type: 'host-event' }> {
+		// Copy, so a host that changes the object later does not change the record.
+		const recorded = structuredClone(payload);
+		if (key !== undefined) {
+			const index = this.timeline.findIndex(
+				(item) => item.type === 'host-event' && item.name === name && item.key === key,
+			);
+			const existing = this.timeline[index];
+			if (existing?.type === 'host-event') {
+				const replaced = { ...existing, payload: recorded };
+				this.timeline[index] = replaced;
+				// Text or reasoning can still stream here, so keep it in the snapshot.
+				this.emitTimelineSnapshot(this.activeBlock());
+				return replaced;
+			}
+		}
+		this.flushReasoningBuffer();
+		this.flushTextBuffer();
+		const event: Extract<TimelineEvent, { type: 'host-event' }> = {
+			type: 'host-event',
+			name,
+			...(key !== undefined ? { key } : {}),
+			payload: recorded,
+			timestamp: Date.now(),
+		};
+		this.appendCompletedEvent(event);
+		return event;
+	}
 
 	/** Feed a stream chunk into the recorder. */
 	record(chunk: StreamChunk): void {
 		switch (chunk.type) {
 			case 'text-delta':
-				if (this.textStartTime === null) this.textStartTime = Date.now();
+				this.flushReasoningBuffer();
+				if (this.textStartTime === null) {
+					this.textStartTime = Date.now();
+				}
 				this.textParts.push(chunk.delta);
 				this.textBuffer.push(chunk.delta);
+				this.scheduleTimelineSnapshot();
+				break;
+			case 'reasoning-start':
+				this.flushTextBuffer();
+				this.flushReasoningBuffer();
+				this.reasoningStartTime = Date.now();
+				break;
+			case 'reasoning-delta':
+				this.flushTextBuffer();
+				if (this.reasoningStartTime === null) {
+					this.reasoningStartTime = Date.now();
+				}
+				this.reasoningBuffer.push(chunk.delta);
+				this.scheduleTimelineSnapshot();
+				break;
+			case 'reasoning-end':
+				this.flushReasoningBuffer();
 				break;
 			case 'tool-call':
 				this.recordToolCall(chunk.toolCallId, chunk.toolName, chunk.input);
+				break;
+			case 'tool-approval':
+				if (chunk.phase === 'resolved') {
+					this.recordHitlResponse(chunk.toolCallId, chunk.response);
+				} else {
+					this.flushReasoningBuffer();
+					this.flushTextBuffer();
+					this.appendCompletedEvent({
+						type: 'suspension',
+						toolName: chunk.toolName,
+						toolCallId: chunk.toolCallId,
+						timestamp: Date.now(),
+						suspendPayload: sanitizeExecutionLogValue(chunk.request),
+					});
+				}
 				break;
 			case 'tool-execution-start':
 				this.recordToolExecutionStart(chunk.toolCallId, chunk.startTime);
@@ -252,16 +510,49 @@ export class ExecutionRecorder {
 			case 'tool-execution-end':
 				this.recordToolExecutionEnd(chunk.toolCallId, chunk.isError, chunk.endTime);
 				break;
+			case 'subagent-chunk': {
+				if (chunk.parentToolCallId === undefined) break;
+				const entry = this.findOpenTimelineToolCall(chunk.parentToolCallId);
+				if (!entry) break;
+				let inner = chunk.chunk;
+				if (inner.type === 'text-delta' || inner.type === 'reasoning-delta') {
+					// Trim rather than skip whole: a delta straddling the cap would
+					// otherwise be persisted in full and overshoot it.
+					const used = this.childTraceChars.get(chunk.parentToolCallId) ?? 0;
+					const remaining = CHILD_TRACE_PERSIST_CHAR_BUDGET - used;
+					if (remaining <= 0) break;
+					const delta = inner.delta.slice(0, remaining);
+					this.childTraceChars.set(chunk.parentToolCallId, used + delta.length);
+					inner = { ...inner, delta };
+				}
+				entry.childTrace ??= emptyChildTrace();
+				applyForwardedChildChunk(entry.childTrace, inner);
+				this.scheduleTimelineSnapshot();
+				break;
+			}
 			case 'tool-result':
-				this.recordToolResult(
-					chunk.toolCallId,
-					chunk.toolName,
-					chunk.output,
-					chunk.isError === true,
-				);
+				this.recordToolResult(chunk);
+				break;
+			case 'usage':
+				this.usage = {
+					promptTokens: chunk.usage.promptTokens,
+					completionTokens: chunk.usage.completionTokens,
+					totalTokens: chunk.usage.totalTokens,
+				};
+				this.model = chunk.model;
+				this.totalCost = chunk.usage.cost ?? null;
 				break;
 			case 'finish':
+				this.flushReasoningBuffer();
 				this.flushTextBuffer();
+				if (chunk.guardrail) {
+					this.guardrailCode = chunk.guardrail.code;
+					this.appendCompletedEvent({
+						type: 'guardrail',
+						code: chunk.guardrail.code,
+						timestamp: Date.now(),
+					});
+				}
 				this.finishReason = chunk.finishReason;
 				if (chunk.usage) {
 					this.usage = {
@@ -269,23 +560,48 @@ export class ExecutionRecorder {
 						completionTokens: chunk.usage.completionTokens,
 						totalTokens: chunk.usage.totalTokens,
 					};
+					this.totalCost = chunk.usage.cost ?? null;
+					this.cacheReadTokens = chunk.usage.inputTokenDetails?.cacheRead ?? null;
+					this.cacheWriteTokens = chunk.usage.inputTokenDetails?.cacheWrite ?? null;
 				}
-				this.model = chunk.model ?? null;
-				this.totalCost = chunk.usage?.cost ?? null;
+				this.model = chunk.model ?? this.model;
 				break;
 			case 'tool-call-suspended':
+				this.flushReasoningBuffer();
 				this.flushTextBuffer();
 				this._suspended = true;
-				this.timeline.push({
+				if (
+					isRecord(chunk.suspendPayload) &&
+					chunk.suspendPayload.type === WORKFLOW_WAIT_SUSPEND_TYPE &&
+					!this.timeline.some(
+						(event) => event.type === 'hitl-response' && event.toolCallId === chunk.toolCallId,
+					) &&
+					this.timeline.some(
+						(event) =>
+							event.type === 'suspension' &&
+							event.toolCallId === chunk.toolCallId &&
+							isRecord(event.suspendPayload) &&
+							event.suspendPayload.type === 'approval',
+					)
+				)
+					break;
+				this.appendCompletedEvent({
 					type: 'suspension',
 					toolName: chunk.toolName ?? '',
 					toolCallId: chunk.toolCallId ?? '',
 					timestamp: Date.now(),
+					...(chunk.input !== undefined && {
+						input: sanitizeExecutionLogValue(chunk.input),
+					}),
+					...(chunk.suspendPayload !== undefined && {
+						suspendPayload: sanitizeExecutionLogValue(chunk.suspendPayload),
+					}),
 				});
 				break;
 			case 'error': {
-				const errMsg = chunk.error instanceof Error ? chunk.error.message : String(chunk.error);
-				this.error = errMsg;
+				this.flushReasoningBuffer();
+				this.flushTextBuffer();
+				this.error ??= normaliseStreamError(chunk.error);
 				break;
 			}
 		}
@@ -296,8 +612,15 @@ export class ExecutionRecorder {
 		return this._suspended;
 	}
 
+	get startedAt(): Date {
+		return new Date(this.startTime);
+	}
+
 	/** Build the final message record after the stream has ended. */
 	getMessageRecord(): MessageRecord {
+		clearTimeout(this.timelineSnapshotTimer);
+		this.timelineSnapshotTimer = undefined;
+		this.flushReasoningBuffer();
 		this.flushTextBuffer();
 		return {
 			assistantResponse: this.textParts.join(''),
@@ -305,21 +628,27 @@ export class ExecutionRecorder {
 			finishReason: this.finishReason,
 			usage: this.usage,
 			totalCost: this.totalCost,
-			toolCalls: this.toolCalls.map(({ toolCallId: _toolCallId, ...toolCall }) => toolCall),
+			cacheReadTokens: this.cacheReadTokens,
+			cacheWriteTokens: this.cacheWriteTokens,
 			timeline: this.timeline,
 			startTime: this.startTime,
 			duration: Date.now() - this.startTime,
 			error: this.error,
+			guardrailCode: this.guardrailCode,
 		};
 	}
 
 	/** Flush accumulated text into a timeline event. */
 	private flushTextBuffer(): void {
+		if (this.textStartTime !== null && this.timelineSnapshotTimer) {
+			clearTimeout(this.timelineSnapshotTimer);
+			this.timelineSnapshotTimer = undefined;
+		}
 		if (this.textBuffer.length === 0) return;
 		const content = this.textBuffer.join('');
 		if (content.trim()) {
 			const now = Date.now();
-			this.timeline.push({
+			this.appendCompletedEvent({
 				type: 'text',
 				content,
 				// Generation start (first text-delta) → end (now). Falls back to `now`
@@ -332,15 +661,48 @@ export class ExecutionRecorder {
 		this.textStartTime = null;
 	}
 
+	/** Flush accumulated reasoning without including it in `assistantResponse`. */
+	private flushReasoningBuffer(): void {
+		if (this.reasoningStartTime !== null && this.timelineSnapshotTimer) {
+			clearTimeout(this.timelineSnapshotTimer);
+			this.timelineSnapshotTimer = undefined;
+		}
+		if (this.reasoningBuffer.length === 0) {
+			this.reasoningStartTime = null;
+			return;
+		}
+		const content = this.reasoningBuffer.join('');
+		if (content.trim()) {
+			const now = Date.now();
+			this.appendCompletedEvent({
+				type: 'reasoning',
+				content,
+				timestamp: this.reasoningStartTime ?? now,
+				endTime: now,
+			});
+		}
+		this.reasoningBuffer = [];
+		this.reasoningStartTime = null;
+	}
+
+	private scheduleTimelineSnapshot(): void {
+		if (this.timelineSnapshotTimer) return;
+		this.timelineSnapshotTimer = setTimeout(() => {
+			this.timelineSnapshotTimer = undefined;
+			this.emitTimelineSnapshot(this.activeBlock());
+		}, TIMELINE_BLOCK_MAX_DURATION_MS);
+		this.timelineSnapshotTimer.unref();
+	}
+
 	/**
-	 * Record a discrete `tool-call` chunk from the stream. Maintains both the
-	 * flat `toolCalls` array (backward compat) and the ordered timeline. The
-	 * matching `tool-result` chunk closes the timeline entry.
+	 * Record a discrete `tool-call` chunk from the stream. The matching
+	 * `tool-result` chunk closes the timeline entry.
 	 */
 	private recordToolCall(toolCallId: string, name: string, input: unknown): void {
+		this.flushReasoningBuffer();
 		this.flushTextBuffer();
 
-		this.toolCalls.push({ name, input, output: undefined, toolCallId });
+		const recordedInput = sanitizeExecutionLogValue(input);
 
 		const entry = this.registry.get(name);
 		// Resolve both `$fromAI(...)` placeholders and simple `={{ $json.x }}`
@@ -351,14 +713,14 @@ export class ExecutionRecorder {
 			input !== null && typeof input === 'object' ? (input as Record<string, unknown>) : {};
 		const resolvedNodeParameters =
 			entry?.nodeParameters !== undefined
-				? (resolveTemplatesInValue(entry.nodeParameters, llmArgs) as Record<string, unknown>)
+				? sanitizeExecutionLogRecord(resolveTemplatesInValue(entry.nodeParameters, llmArgs))
 				: undefined;
 		this.timeline.push({
 			type: 'tool-call',
 			kind: entry?.kind ?? 'tool',
 			name,
 			toolCallId,
-			input,
+			input: recordedInput,
 			output: undefined as unknown,
 			startTime: Date.now(),
 			endTime: 0,
@@ -383,7 +745,10 @@ export class ExecutionRecorder {
 	private recordToolExecutionStart(toolCallId: string, startTime: number): void {
 		if (!toolCallId) return;
 		const entry = this.findOpenTimelineToolCall(toolCallId);
-		if (entry) entry.startTime = startTime;
+		if (entry) {
+			entry.startTime = startTime;
+			this.emitTimelineSnapshot();
+		}
 	}
 
 	/**
@@ -398,6 +763,8 @@ export class ExecutionRecorder {
 		if (entry) {
 			entry.endTime = endTime;
 			entry.success = !isError;
+			if (entry.childTrace) settleChildTrace(entry.childTrace);
+			this.emitTimelineSnapshot();
 		}
 	}
 
@@ -414,19 +781,6 @@ export class ExecutionRecorder {
 	}
 
 	/**
-	 * Find the still-open flat tool-call entry to attach a result to. Prefers
-	 * an exact match on `toolCallId`; when the stream omits the id (empty
-	 * string), falls back to the most recent open entry (`output === undefined`)
-	 * with the same tool name.
-	 */
-	private findOpenToolCall(toolCallId: string, name: string): PendingRecordedToolCall | undefined {
-		if (toolCallId !== '') {
-			return this.toolCalls.find((tc) => tc.toolCallId === toolCallId && tc.output === undefined);
-		}
-		return [...this.toolCalls].reverse().find((tc) => tc.name === name && tc.output === undefined);
-	}
-
-	/**
 	 * Record a discrete `tool-result` chunk from the stream. Closes the
 	 * matching open timeline entry by `toolCallId` (preferred) or by name as
 	 * a fallback.
@@ -436,20 +790,15 @@ export class ExecutionRecorder {
 	 * timeline entry to close. In that case we synthesize one from the
 	 * registry so workflow rows and execution-log links still render.
 	 */
-	private recordToolResult(
-		toolCallId: string,
-		name: string,
-		output: unknown,
-		isError: boolean,
-	): void {
-		const recordedOutput = isError ? normaliseToolErrorOutput(output) : output;
-
-		const pendingFlat = this.findOpenToolCall(toolCallId, name);
-		if (pendingFlat) {
-			pendingFlat.output = recordedOutput;
-		} else {
-			this.toolCalls.push({ name, input: undefined, output: recordedOutput });
-		}
+	private recordToolResult(chunk: StreamChunk & { type: 'tool-result' }): void {
+		const { toolCallId, toolName: name, output } = chunk;
+		const isError = chunk.isError === true;
+		const canceled = chunk.canceled === true;
+		const recordedOutput = sanitizeExecutionLogValue(
+			isError ? normaliseToolErrorOutput(output) : output,
+		);
+		const traceOutput =
+			chunk.traceOutput !== undefined ? sanitizeExecutionLogValue(chunk.traceOutput) : undefined;
 
 		const pendingTimeline = [...this.timeline]
 			.reverse()
@@ -461,11 +810,14 @@ export class ExecutionRecorder {
 		if (pendingTimeline) {
 			pendingTimeline.output = recordedOutput;
 			pendingTimeline.success = !isError;
+			if (canceled) pendingTimeline.canceled = true;
+			if (traceOutput !== undefined) pendingTimeline.traceOutput = traceOutput;
 			// `tool-execution-end` (real per-tool finish) normally closed this entry
 			// already; only fall back to the batched result time if it never fired.
 			if (pendingTimeline.endTime === 0) {
 				pendingTimeline.endTime = Date.now();
 			}
+			if (pendingTimeline.childTrace) settleChildTrace(pendingTimeline.childTrace);
 
 			if (pendingTimeline.kind === 'workflow' && isRecord(recordedOutput)) {
 				const execId = recordedOutput.executionId;
@@ -473,9 +825,11 @@ export class ExecutionRecorder {
 					pendingTimeline.workflowExecutionId = execId;
 				}
 			}
+			this.emitTimelineSnapshot();
 			return;
 		}
 
+		this.flushReasoningBuffer();
 		this.flushTextBuffer();
 		const entry = this.registry.get(name);
 		const now = Date.now();
@@ -489,13 +843,18 @@ export class ExecutionRecorder {
 			startTime: now,
 			endTime: now,
 			success: !isError,
+			...(canceled ? { canceled: true } : {}),
+			...(traceOutput !== undefined ? { traceOutput } : {}),
 			workflowId: entry?.workflowId,
 			workflowName: entry?.workflowName,
 			triggerType: entry?.triggerType,
 			nodeType: entry?.nodeType,
 			nodeTypeVersion: entry?.nodeTypeVersion,
 			nodeDisplayName: entry?.nodeDisplayName,
-			nodeParameters: entry?.nodeParameters,
+			nodeParameters:
+				entry?.nodeParameters !== undefined
+					? sanitizeExecutionLogRecord(entry.nodeParameters)
+					: undefined,
 		};
 		if (synthesized.kind === 'workflow' && isRecord(recordedOutput)) {
 			const execId = recordedOutput.executionId;
@@ -503,6 +862,39 @@ export class ExecutionRecorder {
 				synthesized.workflowExecutionId = execId;
 			}
 		}
-		this.timeline.push(synthesized);
+		this.appendCompletedEvent(synthesized);
+	}
+
+	private appendCompletedEvent(event: TimelineEvent): void {
+		this.timeline.push(event);
+		this.emitTimelineSnapshot();
+	}
+
+	/** The text or reasoning block that still streams, as it would be flushed now. */
+	private activeBlock(): TimelineEvent | undefined {
+		const now = Date.now();
+		if (this.textStartTime !== null && this.textBuffer.length > 0) {
+			return {
+				type: 'text',
+				content: this.textBuffer.join(''),
+				timestamp: this.textStartTime,
+				endTime: now,
+			};
+		}
+		if (this.reasoningStartTime !== null && this.reasoningBuffer.length > 0) {
+			return {
+				type: 'reasoning',
+				content: this.reasoningBuffer.join(''),
+				timestamp: this.reasoningStartTime,
+				endTime: now,
+			};
+		}
+		return undefined;
+	}
+
+	private emitTimelineSnapshot(activeEvent?: TimelineEvent): void {
+		if (!this.onTimelineSnapshot) return;
+		const timeline = activeEvent ? [...this.timeline, activeEvent] : this.timeline;
+		this.onTimelineSnapshot(structuredClone(timeline));
 	}
 }

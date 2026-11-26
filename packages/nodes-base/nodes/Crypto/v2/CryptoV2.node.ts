@@ -1,3 +1,5 @@
+import { formatPemBlock } from '@n8n/utils/format-pem-block';
+import { isUtf8 } from 'buffer';
 import type { BinaryToTextEncoding, CipherGCMTypes } from 'crypto';
 import {
 	constants,
@@ -24,8 +26,6 @@ import type {
 import { deepCopy, BINARY_ENCODING, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 import { pipeline } from 'stream/promises';
 import { v4 as uuid } from 'uuid';
-
-import { formatPrivateKey } from '../../../utils/utilities';
 
 const unsupportedAlgorithms = [
 	'RSA-MD4',
@@ -526,6 +526,25 @@ const versionDescription: INodeTypeDescription = {
 			required: true,
 		},
 		{
+			displayName: 'Hash Algorithm',
+			name: 'oaepHash',
+			type: 'options',
+			options: [
+				{ name: 'SHA256', value: 'sha256' },
+				{ name: 'SHA1', value: 'sha1' },
+			],
+			default: 'sha256',
+			description:
+				'Hash algorithm for RSA-OAEP. Select the same value for encryption and decryption.',
+			displayOptions: {
+				show: {
+					action: ['encrypt', 'decrypt'],
+					mode: ['asymmetric'],
+				},
+			},
+			required: true,
+		},
+		{
 			displayName: 'Value',
 			name: 'value',
 			type: 'string',
@@ -604,7 +623,7 @@ export class CryptoV2 implements INodeType {
 						'No private key set in credentials. Please add a private key to your Crypto credentials.',
 					);
 				}
-				signPrivateKey = formatPrivateKey(credentials.signPrivateKey);
+				signPrivateKey = formatPemBlock(credentials.signPrivateKey);
 			}
 
 			if (action === 'encrypt' || action === 'decrypt') {
@@ -627,7 +646,7 @@ export class CryptoV2 implements INodeType {
 							'No encryption public key set in credentials. Please add an Encryption Public Key to your Crypto credentials.',
 						);
 					}
-					encryptionPublicKey = formatPrivateKey(credentials.encryptionPublicKey, true);
+					encryptionPublicKey = formatPemBlock(credentials.encryptionPublicKey, true);
 				}
 
 				if (mode === 'asymmetric' && action === 'decrypt') {
@@ -637,7 +656,7 @@ export class CryptoV2 implements INodeType {
 							'No encryption private key set in credentials. Please add an Encryption Private Key to your Crypto credentials.',
 						);
 					}
-					encryptionPrivateKey = formatPrivateKey(credentials.encryptionPrivateKey);
+					encryptionPrivateKey = formatPemBlock(credentials.encryptionPrivateKey);
 				}
 			}
 		}
@@ -728,11 +747,12 @@ export class CryptoV2 implements INodeType {
 						]).toString('base64');
 					} else {
 						try {
+							const oaepHash = this.getNodeParameter('oaepHash', i, 'sha256') as string;
 							const encrypted = publicEncrypt(
 								{
 									key: encryptionPublicKey,
 									padding: constants.RSA_PKCS1_OAEP_PADDING,
-									oaepHash: 'sha256',
+									oaepHash,
 								},
 								Buffer.from(value, 'utf8'),
 							);
@@ -792,15 +812,17 @@ export class CryptoV2 implements INodeType {
 							const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 							newValue = plaintext.toString('utf8');
 						} else {
+							const oaepHash = this.getNodeParameter('oaepHash', i, 'sha256') as string;
 							const decrypted = privateDecrypt(
 								{
 									key: encryptionPrivateKey,
 									padding: constants.RSA_PKCS1_OAEP_PADDING,
-									oaepHash: 'sha256',
+									oaepHash,
 								},
 								Buffer.from(value, 'base64'),
 							);
-							newValue = decrypted.toString('utf8');
+							// Use base64 when UTF-8 would change the decrypted bytes.
+							newValue = decrypted.toString(isUtf8(decrypted) ? 'utf8' : 'base64');
 						}
 					} catch (error) {
 						if (error instanceof NodeOperationError) throw error;

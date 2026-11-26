@@ -16,39 +16,66 @@
 import { useNodeHelpers } from '@/app/composables/useNodeHelpers';
 import { setParameterValue } from '@/app/utils/parameterUtils';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
+import { useNodeTypesLoad } from '@/app/composables/useNodeTypesLoad';
 import { useCredentialsStore } from '@/features/credentials/credentials.store';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
 import NodeCredentials from '@/features/credentials/components/NodeCredentials.vue';
 import ParameterInputList from '@/features/ndv/parameters/components/ParameterInputList.vue';
-import { collectParametersByTab, createCommonNodeSettings } from '@/features/ndv/shared/ndv.utils';
+import {
+	collectParametersByTab,
+	createCommonNodeSettings,
+	removeMismatchedOptionValues,
+	resetValuesOfChangedShape,
+} from '@/features/ndv/shared/ndv.utils';
+import { omitOperationOptions } from '@/features/shared/toolConfig/toolConfig.utils';
 import type { INodeUpdatePropertiesInformation, ITab, IUpdateInformation } from '@/Interface';
-import { N8nTabs, N8nText } from '@n8n/design-system';
+import { N8nIcon, N8nTabs, N8nText } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
-import { Workflow, NodeHelpers, deepCopy, type INode, type INodeParameters } from 'n8n-workflow';
+import {
+	NodeHelpers,
+	deepCopy,
+	type INode,
+	type INodeParameters,
+	type Workflow,
+} from 'n8n-workflow';
 import { computed, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue';
 import {
 	ChatHubToolContextKey,
 	ExpressionLocalResolveContextSymbol,
+	ToolConfigCredentialSelectedKey,
 	WorkflowDocumentStoreKey,
 } from '@/app/constants';
 import type { ExpressionLocalResolveContext } from '@/app/types/expressions';
 import useEnvironmentsStore from '@/features/settings/environments.ee/environments.store';
-import { useSettingsStore } from '@/app/stores/settings.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import {
 	createWorkflowDocumentId,
+	disposeWorkflowDocumentStore,
 	useWorkflowDocumentStore,
 } from '@/app/stores/workflowDocument.store';
+import { disposeNDVStore, useNDVStore } from '@/features/ndv/shared/ndv.store';
 
 const props = defineProps<{
 	initialNode: INode;
 	existingToolNames?: string[];
 	hideAskAssistant?: boolean;
 	projectId?: string;
+	forAgent?: boolean;
+	/** Resource/operation option values to hide from the form (e.g. operations the hosting runtime cannot execute). */
+	hiddenOperations?: readonly string[];
+	/** Parameter names owned by the hosting surface instead of the node form. */
+	hiddenParameters?: readonly string[];
+	parameterIssues?: Record<string, string[]>;
+	fromAiDisabledParameters?: string[];
+	/** Keeps standalone Agent tool parameters resolvable through the scoped NDV store. */
+	syncNodeToNdv?: boolean;
+	readOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
 	'update:valid': [isValid: boolean];
 	'update:node-name': [name: string];
+	'update:node': [node: INode];
 }>();
 
 const i18n = useI18n();
@@ -60,16 +87,36 @@ const environmentsStore = useEnvironmentsStore();
 const settingsStore = useSettingsStore();
 
 const node = shallowRef<INode | null>(props.initialNode);
+// The defaults come from the node type. Fill them one time, after the node types load.
+const { isLoading: nodeTypesLoading } = useNodeTypesLoad();
 const userEditedName = ref(false);
 
 const existingToolNames = computed(() => props.existingToolNames ?? []);
-const credentialProjectId = computed(() => props.projectId ?? projectsStore.personalProject?.id);
+// `props.projectId` can be an empty string when the agent scope id has not
+// resolved yet (see `useAgentScopeProjectId`), so fall back with `||` rather
+// than `??` — otherwise the empty string sticks and the credential fetch below
+// is skipped on first open.
+const credentialProjectId = computed(() => props.projectId || projectsStore.personalProject?.id);
 
 const nodeTypeDescription = computed(() => {
 	if (!props.initialNode) {
 		return null;
 	}
-	return nodeTypesStore.getNodeType(props.initialNode.type);
+	const description = nodeTypesStore.getNodeType(props.initialNode.type);
+	if (!description) return null;
+
+	const withFilteredOperations = props.hiddenOperations?.length
+		? omitOperationOptions(description, props.hiddenOperations)
+		: description;
+	if (!props.hiddenParameters?.length) return withFilteredOperations;
+
+	const hiddenParameters = new Set(props.hiddenParameters);
+	return {
+		...withFilteredOperations,
+		properties: withFilteredOperations.properties.filter(
+			(parameter) => !hiddenParameters.has(parameter.name),
+		),
+	};
 });
 
 type ToolSettingsTab = 'params' | 'settings';
@@ -136,21 +183,30 @@ const hasCredentialIssues = computed(() => {
 		nodeTypeDescription.value,
 		node.value,
 		{ getNode: () => node.value } as unknown as Workflow,
-		['parameters', 'execution', 'typeUnknown', 'input'],
+		['parameters', 'typeUnknown', 'input'],
 	);
 
 	return Object.keys(credentialIssues?.credentials ?? {}).length > 0;
 });
 
-const workflowDocumentStore = computed(() => {
-	const store = useWorkflowDocumentStore(createWorkflowDocumentId('node-tool-workflow'));
+// The tool document has a local key and no saved workflow ID.
+const toolWorkflowDocumentId = createWorkflowDocumentId('', 'node-tool-workflow');
+const toolWorkflowStore = useWorkflowDocumentStore(toolWorkflowDocumentId);
+const toolNdvStore = useNDVStore(toolWorkflowDocumentId);
+const workflowDocumentStore = computed(() => toolWorkflowStore);
 
-	if (node.value) {
-		store.setNodes([node.value]);
-	}
-
-	return store;
-});
+watch(
+	node,
+	(currentNode) => {
+		if (currentNode) {
+			toolWorkflowStore.setNodes([currentNode]);
+			if (props.syncNodeToNdv) {
+				toolNdvStore.setActiveNodeName(currentNode.name, 'other');
+			}
+		}
+	},
+	{ immediate: true },
+);
 
 const expressionResolveCtx = computed<ExpressionLocalResolveContext | undefined>(() => {
 	if (!node.value) return undefined;
@@ -164,8 +220,25 @@ const expressionResolveCtx = computed<ExpressionLocalResolveContext | undefined>
 	};
 });
 
+// Agents cannot use personal credentials yet. A saved selection that the
+// agent-scoped fetch no longer returns must block saving.
+const agentCredentialsLoaded = ref(false);
+const hasUnavailableAgentCredential = computed(() => {
+	if (!props.forAgent || !agentCredentialsLoaded.value) return false;
+	return Object.values(node.value?.credentials ?? {}).some(
+		(credential) => credential.id && !credentialsStore.getUsableCredentialById(credential.id),
+	);
+});
+
 const isValid = computed(() => {
-	return node.value?.name && !hasParameterIssues.value && !hasCredentialIssues.value;
+	// Without the node type, the parameters can't be checked and have no defaults yet.
+	return (
+		!nodeTypesLoading.value &&
+		node.value?.name &&
+		!hasParameterIssues.value &&
+		!hasCredentialIssues.value &&
+		!hasUnavailableAgentCredential.value
+	);
 });
 
 // Provide expression resolve context for dynamic parameter loading
@@ -185,8 +258,52 @@ function makeUniqueName(baseName: string, existingNames: string[]): string {
 function handleChangeParameter(updateData: IUpdateInformation) {
 	if (!node.value) return;
 
-	const newParameters = deepCopy(node.value.parameters);
-	setParameterValue(newParameters, updateData.name, updateData.value);
+	const nodeType = nodeTypeDescription.value;
+	if (!nodeType) {
+		const newParameters = deepCopy(node.value.parameters);
+		setParameterValue(newParameters, updateData.name, updateData.value);
+		node.value = { ...node.value, parameters: newParameters };
+		return;
+	}
+
+	// Re-derive parameters the same way the NDV does (see
+	// `useNodeSettingsParameters.updateNodeParameter`): strip to user-set values,
+	// apply the change, drop options and same-named values that no longer match,
+	// then refill defaults.
+	// This resets a dependent param (e.g. `operation`) to the new resource's
+	// default when `resource` changes, instead of keeping a stale selection.
+	let parameters =
+		NodeHelpers.getNodeParameters(
+			nodeType.properties,
+			node.value.parameters,
+			false,
+			false,
+			node.value,
+			nodeType,
+		) ?? {};
+	parameters = deepCopy(parameters);
+
+	setParameterValue(parameters, updateData.name, updateData.value);
+	if (updateData.value !== undefined) {
+		// `removeMismatchedOptionValues` keys off the changed param's `name` only;
+		// its `value` field is unused, so `null` keeps the call type-clean.
+		removeMismatchedOptionValues(nodeType, node.value.typeVersion, parameters, {
+			name: updateData.name,
+			value: null,
+		});
+	}
+
+	parameters = resetValuesOfChangedShape(nodeType, node.value, parameters, [updateData.name]);
+
+	const newParameters =
+		NodeHelpers.getNodeParameters(
+			nodeType.properties,
+			parameters,
+			true,
+			false,
+			node.value,
+			nodeType,
+		) ?? parameters;
 
 	node.value = {
 		...node.value,
@@ -227,6 +344,10 @@ function handleChangeCredential(updateData: INodeUpdatePropertiesInformation) {
 	}
 }
 
+// CredentialsSelect → ParameterInput writes the document store only; this
+// keeps the local draft (isValid / save payload) in sync.
+provide(ToolConfigCredentialSelectedKey, handleChangeCredential);
+
 function handleChangeName(name: string) {
 	if (node.value) {
 		userEditedName.value = true;
@@ -235,8 +356,9 @@ function handleChangeName(name: string) {
 }
 
 watch(
-	() => props.initialNode,
-	(initialNode) => {
+	() => [props.initialNode, nodeTypesLoading.value] as const,
+	([initialNode, loading]) => {
+		if (loading) return;
 		if (initialNode) {
 			const uniqueName = makeUniqueName(initialNode.name, existingToolNames.value);
 			let nodeData =
@@ -317,6 +439,16 @@ watch(isValid, (val) => {
 });
 
 watch(
+	node,
+	(updatedNode) => {
+		if (updatedNode) {
+			emit('update:node', updatedNode);
+		}
+	},
+	{ immediate: true },
+);
+
+watch(
 	() => node.value?.name,
 	(name) => {
 		if (name) {
@@ -335,8 +467,16 @@ onMounted(async () => {
 	// Set project context for dynamic parameter loading and credential creation.
 	if (props.projectId) {
 		await projectsStore.fetchAndSetProject(props.projectId);
-	} else if (projectsStore.personalProject) {
-		projectsStore.setCurrentProject(projectsStore.personalProject);
+	} else {
+		// No usable project scope was provided (the agent scope id can resolve to
+		// '' before project state loads). Ensure the personal project is loaded so
+		// the credential fetch below has a real scope on first open.
+		if (!projectsStore.personalProject) {
+			await projectsStore.getPersonalProject();
+		}
+		if (projectsStore.personalProject) {
+			projectsStore.setCurrentProject(projectsStore.personalProject);
+		}
 	}
 
 	// Ensure credentials are loaded for the credentials selector to work.
@@ -344,17 +484,27 @@ onMounted(async () => {
 	// credentials from another project do not bleed into this tool config.
 	const projectId = credentialProjectId.value;
 	if (projectId) {
-		credentialsStore.setCredentials([]);
 		await Promise.all([
 			credentialsStore.fetchCredentialTypes(false),
-			credentialsStore.fetchAllCredentialsForWorkflow({ projectId }),
+			credentialsStore.fetchUsableCredentials({
+				projectId,
+				...(props.forAgent ? { forAgent: true } : {}),
+			}),
 		]);
+		agentCredentialsLoaded.value = true;
 	}
 });
 
 onBeforeUnmount(() => {
 	// Clear current project to avoid side effects
 	projectsStore.setCurrentProject(null);
+
+	// Dispose the scoped document store and the NDV store its descendants
+	// materialize — Pinia stores are not freed on unmount. The doc id is a
+	// constant and only one tool-config host is mounted at a time.
+	const documentStore = workflowDocumentStore.value;
+	disposeNDVStore(toolNdvStore);
+	disposeWorkflowDocumentStore(documentStore);
 });
 
 defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
@@ -370,7 +520,10 @@ defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
 			@update:model-value="activeTab = $event"
 		/>
 
-		<div :class="$style.tabContent">
+		<div v-if="nodeTypesLoading" :class="$style.loading" data-test-id="tool-settings-loading">
+			<N8nIcon icon="loader-circle" size="large" spin />
+		</div>
+		<div v-else :class="$style.tabContent">
 			<!-- Parameters Tab -->
 			<div v-show="activeTab === 'params'">
 				<ParameterInputList
@@ -378,20 +531,27 @@ defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
 					:parameters="parametersByTab.params"
 					:hide-delete="true"
 					:node-values="node.parameters"
-					:is-read-only="false"
+					:is-read-only="props.readOnly"
 					:node="node"
+					:parameter-issues="props.parameterIssues"
+					:from-ai-disabled-parameters="props.fromAiDisabledParameters"
 					@value-changed="handleChangeParameter"
 				>
 					<NodeCredentials
 						:node="node"
-						:readonly="false"
+						:readonly="props.readOnly"
 						:show-all="true"
 						:project-id="credentialProjectId"
+						:for-agent="props.forAgent"
 						:hide-issues="false"
 						:hide-ask-assistant="props.hideAskAssistant"
+						:skip-credentials-fetch="true"
 						@credential-selected="handleChangeCredential"
 						@value-changed="handleChangeParameter"
 					/>
+					<div v-if="$slots.commonSettings" :class="$style.commonSettings">
+						<slot name="commonSettings" />
+					</div>
 				</ParameterInputList>
 				<div v-if="showNoParametersNotice" :class="$style.noParameters">
 					<N8nText>
@@ -406,7 +566,7 @@ defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
 					v-if="node && parametersByTab.settings.length > 0"
 					:parameters="parametersByTab.settings"
 					:node-values="settingsNodeValues"
-					:is-read-only="false"
+					:is-read-only="props.readOnly"
 					:hide-delete="true"
 					path="parameters"
 					:node="node"
@@ -417,7 +577,7 @@ defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
 					:parameters="nodeSettings"
 					:hide-delete="true"
 					:node-values="settingsNodeValues"
-					:is-read-only="false"
+					:is-read-only="props.readOnly"
 					path=""
 					:node="node"
 					@value-changed="handleChangeSettingsValue"
@@ -449,7 +609,18 @@ defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
 	padding-right: var(--spacing--lg);
 }
 
+.loading {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--spacing--xl);
+}
+
 .noParameters {
+	margin-top: var(--spacing--xs);
+}
+
+.commonSettings {
 	margin-top: var(--spacing--xs);
 }
 </style>
