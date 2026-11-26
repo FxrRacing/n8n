@@ -10,7 +10,7 @@ other users. n8n's own sharing UI and team projects are Enterprise features (see
 workflows. This spec solves it in two layers, both inside the Sustainable Use License's "internal
 business purposes" grant and without modifying or deriving from any `.ee` file:
 
-1. **`fxr-sharing` module** (built, `packages/cli/src/modules/fxr-sharing/`): an FXR-authored
+1. **`fxr-sharing` module** (built, `packages/modules/fxr/backend/src/fxr-sharing/`): an FXR-authored
    backend module that writes `workflow:editor` / `credential:user` rows into the free
    `shared_workflow` and `shared_credentials` tables. n8n's list, open, run and update paths are
    role-driven and license-free, so sharees see and edit shared items in the normal UI. Enabled per

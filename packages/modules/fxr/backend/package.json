@@ -1,0 +1,86 @@
+{
+  "name": "@n8n/backend-module-fxr",
+  "version": "0.1.0",
+  "description": "FXR-authored backend modules: fxr-insights, fxr-projects, fxr-sharing, fxr-sso",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./fxr-insights/module": {
+      "types": "./dist/fxr-insights/fxr-insights.module.d.ts",
+      "import": "./dist/fxr-insights/fxr-insights.module.js",
+      "require": "./dist/fxr-insights/fxr-insights.module.js"
+    },
+    "./fxr-projects/module": {
+      "types": "./dist/fxr-projects/fxr-projects.module.d.ts",
+      "import": "./dist/fxr-projects/fxr-projects.module.js",
+      "require": "./dist/fxr-projects/fxr-projects.module.js"
+    },
+    "./fxr-sharing/module": {
+      "types": "./dist/fxr-sharing/fxr-sharing.module.d.ts",
+      "import": "./dist/fxr-sharing/fxr-sharing.module.js",
+      "require": "./dist/fxr-sharing/fxr-sharing.module.js"
+    },
+    "./fxr-sso/module": {
+      "types": "./dist/fxr-sso/fxr-sso.module.d.ts",
+      "import": "./dist/fxr-sso/fxr-sso.module.js",
+      "require": "./dist/fxr-sso/fxr-sso.module.js"
+    }
+  },
+  "files": [
+    "dist/**/*"
+  ],
+  "scripts": {
+    "clean": "rimraf dist .turbo",
+    "dev": "pnpm watch",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "build:unchecked": "tsc -p tsconfig.build.json --noCheck",
+    "format": "biome format --write .",
+    "format:check": "biome ci .",
+    "lint": "oxlint --type-aware . --quiet",
+    "lint:fix": "oxlint --type-aware . --fix",
+    "watch": "tsc -p tsconfig.build.json --watch",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:dev": "vitest --silent=false"
+  },
+  "dependencies": {
+    "@n8n/api-types": "workspace:*",
+    "@n8n/backend-common": "workspace:*",
+    "@n8n/backend-module-insights": "workspace:*",
+    "@n8n/backend-services": "workspace:*",
+    "@n8n/config": "workspace:*",
+    "@n8n/db": "workspace:*",
+    "@n8n/decorators": "workspace:*",
+    "@n8n/di": "workspace:*",
+    "@n8n/errors": "workspace:*",
+    "@n8n/permissions": "workspace:*",
+    "@n8n/typeorm": "workspace:*",
+    "@n8n/utils": "workspace:*",
+    "express": "catalog:",
+    "luxon": "catalog:",
+    "n8n-core": "workspace:*",
+    "openid-client": "6.8.4",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@n8n/oxlint-config": "workspace:*",
+    "@n8n/typescript-config": "workspace:*",
+    "@n8n/vitest-config": "workspace:*",
+    "@types/express": "catalog:",
+    "@types/luxon": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript": "catalog:typescript",
+    "vite": "catalog:",
+    "vitest": "catalog:",
+    "vitest-mock-extended": "catalog:"
+  },
+  "license": "LicenseRef-n8n-sustainable-use"
+}

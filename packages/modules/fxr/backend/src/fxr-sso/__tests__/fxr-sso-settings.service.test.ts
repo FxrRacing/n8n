@@ -20,7 +20,9 @@ describe('FxrSsoSettingsService', () => {
 	beforeEach(() => {
 		vi.resetAllMocks();
 		urlService.getInstanceBaseUrl.mockReturnValue('https://n8n.fxr.test');
-		cipher.encryptV2.mockImplementation(async (v) => `enc(${String(v)})`);
+		cipher.encryptV2.mockImplementation(
+			async (v) => `enc(${typeof v === 'string' ? v : JSON.stringify(v)})`,
+		);
 		cipher.decryptV2.mockImplementation(async (v) => v.replace(/^enc\(|\)$/g, ''));
 	});
 

@@ -51,12 +51,19 @@ export function emailDomainAllowed(email: string, allowedDomains: string): boole
 	return allowed.includes(domain);
 }
 
+/** A claim is only usable when the provider sent it as a string. */
+const stringClaim = (value: unknown) => (typeof value === 'string' ? value : '');
+
 export function claimsFromIdToken(claims: Record<string, unknown>): SsoClaims {
-	const email = String(claims.email ?? claims.preferred_username ?? claims.upn ?? '')
+	const email = (
+		stringClaim(claims.email) ||
+		stringClaim(claims.preferred_username) ||
+		stringClaim(claims.upn)
+	)
 		.trim()
 		.toLowerCase();
 	return {
-		sub: String(claims.sub ?? ''),
+		sub: stringClaim(claims.sub),
 		email,
 		givenName: typeof claims.given_name === 'string' ? claims.given_name : undefined,
 		familyName: typeof claims.family_name === 'string' ? claims.family_name : undefined,

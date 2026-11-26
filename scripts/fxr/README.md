@@ -23,7 +23,7 @@ same image and share the `n8n-encryption-key` secret. The pipeline deploys both 
 `CONTAINERAPP_WORKER_NAME` repo variable is set. Worker replicas scale 1 to 3 on queue depth.
 - Licensed features inventory: see LICENSED-FEATURES.md
 - Team collaboration spec: see SPEC-team-collaboration.md
-- FXR backend modules live in `packages/cli/src/modules/fxr-*/` and are enabled per environment via
+- FXR backend modules live in `packages/modules/fxr/backend/src/fxr-*/` (one workspace package, `@n8n/backend-module-fxr`, registered in `packages/cli/src/modules/modules.manifest.ts`) and are enabled per environment via
   `N8N_ENABLED_MODULES` (set by the deploy workflow). First one: `fxr-sharing`.
 - fxr-projects spec: see SPEC-fxr-projects.md
 - FXR custom nodes live in `fxr/nodes/<name>/` as standalone n8n community-node packages

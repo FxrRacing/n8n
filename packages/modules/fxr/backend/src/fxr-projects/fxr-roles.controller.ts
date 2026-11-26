@@ -5,6 +5,19 @@ import { Body, Delete, GlobalScope, Param, Patch, Post, RestController } from '@
 import { BadRequestError } from '@n8n/errors';
 import type { Role as RoleDTO } from '@n8n/permissions';
 
+// The n8n server owns this event (its telemetry relay listens for it) and declares it in its own
+// event map, which a module package cannot see. The payload must stay identical to the server's.
+declare module '@n8n/backend-services' {
+	interface EventMap {
+		'custom-role-created': {
+			userId: string;
+			roleSlug: string;
+			scopes: string[];
+			source: 'ui' | 'public-api';
+		};
+	}
+}
+
 /**
  * FXR: custom project roles for internal use. Thin wrapper over the free RoleService
  * create/update/remove methods, mirroring the shape of n8n's /roles endpoints. Project roles

@@ -3,12 +3,13 @@ import { Logger } from '@n8n/backend-common';
 import { UrlService } from '@n8n/backend-services';
 import { Get, RestController } from '@n8n/decorators';
 import { validateRedirectUrl } from '@n8n/utils/validate-redirect-url';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
-import { AuthService } from '@/auth/auth.service';
-import { AuthlessRequest } from '@/requests';
-
+import { FxrSsoSessionIssuer } from './fxr-sso-session-issuer';
 import { FxrSsoService, toOAuthError } from './fxr-sso.service';
+
+/** The auth middleware sets `browserId` on every request, including unauthenticated ones. */
+type BrowserRequest = Request & { browserId?: string };
 
 const STATE_COOKIE = 'fxr-sso-state';
 
@@ -26,33 +27,39 @@ function describeSsoError(error: unknown): string {
 export class FxrSsoController {
 	constructor(
 		private readonly ssoService: FxrSsoService,
-		private readonly authService: AuthService,
+		private readonly sessionIssuer: FxrSsoSessionIssuer,
 		private readonly urlService: UrlService,
 		private readonly logger: Logger,
 	) {}
 
 	/** Browser lands here from the sign-in button. */
 	@Get('/login', { skipAuth: true })
-	async login(req: AuthlessRequest, res: Response) {
+	async login(req: BrowserRequest, res: Response) {
 		if (!(await this.ssoService.isConfigured())) {
 			this.logger.warn('FXR SSO: login requested but SSO is not configured');
 			return this.failToSignin(res);
 		}
 		const query = req.query as Record<string, string | undefined>;
 		const redirect = validateRedirectUrl(query.redirect ?? '');
-		const { authorizationUrl, stateToken } = await this.ssoService.startLogin(redirect);
-		res.cookie(STATE_COOKIE, stateToken, {
-			httpOnly: true,
-			sameSite: 'lax',
-			secure: this.urlService.getInstanceBaseUrl().startsWith('https'),
-			maxAge: 10 * 60 * 1000,
-		});
-		return res.redirect(authorizationUrl);
+		try {
+			const { authorizationUrl, stateToken } = await this.ssoService.startLogin(redirect);
+			res.cookie(STATE_COOKIE, stateToken, {
+				httpOnly: true,
+				sameSite: 'lax',
+				secure: this.urlService.getInstanceBaseUrl().startsWith('https'),
+				maxAge: 10 * 60 * 1000,
+			});
+			return res.redirect(authorizationUrl);
+		} catch (error) {
+			// The provider could not be reached or rejected the configuration (wrong issuer, tenant).
+			this.logger.warn('FXR SSO: could not start sign-in', { message: describeSsoError(error) });
+			return this.failToSignin(res);
+		}
 	}
 
 	/** Identity provider redirects back here. */
 	@Get('/callback', { skipAuth: true })
-	async handleCallback(req: AuthlessRequest, res: Response) {
+	async handleCallback(req: BrowserRequest, res: Response) {
 		const stateToken = (req.cookies as Record<string, string> | undefined)?.[STATE_COOKIE];
 		res.clearCookie(STATE_COOKIE);
 		if (!stateToken) {
@@ -65,7 +72,7 @@ export class FxrSsoController {
 		try {
 			const callbackUrl = new URL(req.originalUrl, this.urlService.getInstanceBaseUrl());
 			const { user, redirect } = await this.ssoService.completeLogin(callbackUrl, stateToken);
-			this.authService.issueCookie(res, user, false, req.browserId);
+			this.sessionIssuer.issueCookie(res, user, req.browserId);
 			return res.redirect(this.urlService.getInstanceBaseUrl() + validateRedirectUrl(redirect));
 		} catch (error) {
 			const message = describeSsoError(error);

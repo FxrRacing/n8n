@@ -29,4 +29,17 @@ export const packagedModules: PackagedModules = {
 	'execution-limits': async () => await import('@n8n/backend-module-execution-limits/module'),
 	'execution-ledger': async () => await import('@n8n/backend-module-execution-ledger/module'),
 	'durable-leases': async () => await import('@n8n/backend-module-durable-leases/module'),
+	// FXR modules, all from the one @n8n/backend-module-fxr package.
+	'fxr-insights': async () => await import('@n8n/backend-module-fxr/fxr-insights/module'),
+	'fxr-projects': async () => await import('@n8n/backend-module-fxr/fxr-projects/module'),
+	'fxr-sharing': async () => await import('@n8n/backend-module-fxr/fxr-sharing/module'),
+	'fxr-sso': async () => {
+		const { FxrSsoSessionIssuer } = await import('@n8n/backend-module-fxr');
+		const { AuthService } = await import('@/auth/auth.service.js');
+		Container.set(FxrSsoSessionIssuer, {
+			issueCookie: (res, person, browserId) =>
+				Container.get(AuthService).issueCookie(res, person, false, browserId),
+		});
+		return await import('@n8n/backend-module-fxr/fxr-sso/module');
+	},
 };

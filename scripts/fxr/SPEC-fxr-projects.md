@@ -30,7 +30,7 @@ So the work is: a backend module that performs the five writes the EE service pe
 (create project, change members, update, delete, move resource), and four small edits to free
 frontend files so the existing UI turns on and calls our endpoints for those writes.
 
-## Backend: `packages/cli/src/modules/fxr-projects/`
+## Backend: `packages/modules/fxr/backend/src/fxr-projects/`
 
 `@BackendModule({ name: 'fxr-projects', instanceTypes: ['main'] })`, `settings()` returns
 `{ enabled: true, teamProjectsLimit: -1 }`, served to the UI via the existing `/rest/module-settings`. Registered by one line in `modules.config.ts`. Uses only `ProjectRepository`,

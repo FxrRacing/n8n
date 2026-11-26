@@ -45,6 +45,7 @@
 		{ "path": "../modules/apps/backend/tsconfig.build.json" },
 		{ "path": "../modules/code-sandbox/backend/tsconfig.build.json" },
 		{ "path": "../modules/execution-limits/backend/tsconfig.build.json" },
+		{ "path": "../modules/fxr/backend/tsconfig.build.json" },
 		{ "path": "../modules/insights/backend/tsconfig.build.json" },
 		{ "path": "../modules/quick-connect/backend/tsconfig.build.json" },
 		{ "path": "../modules/workflow-builder/backend/tsconfig.build.json" },

@@ -23,4 +23,4 @@ same email (identity gets linked) → auto-provision a new user with a personal 
 | `FXR_SSO_LOGIN_LABEL`     | default `Microsoft`                                  |
 
 Email/password login stays available as a break-glass path for the owner. Uses only free code:
-`AuthService.issueCookie`, `UserRepository.createUserWithProject`, `AuthIdentity`, `openid-client`.
+the server's `AuthService.issueCookie` (through `FxrSsoSessionIssuer`, registered in the server's module manifest), `PersonRepository.createPersonWithProject`, `AuthIdentity`, `openid-client`.

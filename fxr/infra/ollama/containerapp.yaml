@@ -1,0 +1,63 @@
+# FXR: Ollama Container App spec. Placeholders are filled by deploy.sh.
+location: __LOCATION__
+properties:
+  environmentId: __ENV_ID__
+  workloadProfileName: __WORKLOAD_PROFILE__
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: false          # internal only: reachable from n8n, not from the internet
+      targetPort: 11434
+      transport: http
+      allowInsecure: true      # plain http inside the environment's private network
+  template:
+    containers:
+      - name: ollama
+        image: __IMAGE__
+        # Start the server, then pull the requested models in the background so the app is
+        # healthy immediately and models land on the persistent share.
+        command: ['/bin/sh', '-c']
+        args:
+          - |
+            ollama serve &
+            pid=$!
+            sleep 5
+            for m in $OLLAMA_PULL_MODELS; do ollama pull "$m" || echo "failed to pull $m"; done
+            wait $pid
+        env:
+          - name: OLLAMA_HOST
+            value: 0.0.0.0:11434
+          - name: OLLAMA_KEEP_ALIVE
+            value: '-1'            # keep the loaded model in memory between requests
+          - name: OLLAMA_PULL_MODELS
+            value: __MODELS__
+        resources:
+          cpu: __CPU__
+          memory: __MEMORY__
+        volumeMounts:
+          - volumeName: models
+            mountPath: /root/.ollama
+        probes:
+          - type: Startup
+            httpGet:
+              path: /
+              port: 11434
+            periodSeconds: 5
+            failureThreshold: 60
+          - type: Liveness
+            httpGet:
+              path: /
+              port: 11434
+            periodSeconds: 30
+    scale:
+      minReplicas: 0             # scale to zero when idle; the first request after idle cold-starts
+      maxReplicas: 1             # models are per-replica; no benefit from fan-out
+      rules:
+        - name: http
+          http:
+            metadata:
+              concurrentRequests: "20"
+    volumes:
+      - name: models
+        storageType: AzureFile
+        storageName: __ENV_STORAGE__
